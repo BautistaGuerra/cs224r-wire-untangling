@@ -25,22 +25,22 @@ Reward:
 
 import numpy as np
 
-import robosuite.utils.transform_utils as T
-from robosuite.environments.manipulation.single_arm_env import SingleArmEnv
+from robosuite.environments.manipulation.manipulation_env import ManipulationEnv
 from robosuite.models.arenas import TableArena
 from robosuite.models.tasks import ManipulationTask
 from robosuite.utils.observables import Observable, sensor
 from robosuite.utils.placement_samplers import UniformRandomSampler
+from robosuite.utils.transform_utils import convert_quat
 
 from wire_untangling.models.objects import StickObject
 
 
-class StickReorderEnv(SingleArmEnv):
+class StickReorderEnv(ManipulationEnv):
     """
     Tabletop stick-reordering task.
 
     Args:
-        robots: Robot specification passed to SingleArmEnv (e.g. "Panda").
+        robots: Robot specification passed to ManipulationEnv (e.g. "Panda").
         num_sticks: Number of sticks to reorder.
         stick_length: Full stick length in metres.
         stick_radius: Stick cross-section half-extent in metres.
@@ -49,7 +49,7 @@ class StickReorderEnv(SingleArmEnv):
         reward_shaping: If True, add dense shaped reward on top of sparse bonus.
         table_full_size: (x, y, z) full size of the table surface.
         table_friction: MuJoCo friction parameters for the table.
-        **kwargs: Forwarded to SingleArmEnv (horizon, control_freq, renderer, …).
+        **kwargs: Forwarded to ManipulationEnv (horizon, control_freq, renderer, …).
     """
 
     def __init__(
@@ -109,6 +109,10 @@ class StickReorderEnv(SingleArmEnv):
     def _load_model(self):
         super()._load_model()
 
+        # Position robot base relative to table
+        xpos = self.robots[0].robot_model.base_xpos_offset["table"](self.table_full_size[0])
+        self.robots[0].robot_model.set_base_xpos(xpos)
+
         self.mujoco_arena = TableArena(
             table_full_size=self.table_full_size,
             table_friction=self.table_friction,
@@ -137,6 +141,7 @@ class StickReorderEnv(SingleArmEnv):
             ensure_valid_placement=True,
             reference_pos=self.table_offset,
             z_offset=0.01,
+            rng=self.rng,
         )
 
         self.model = ManipulationTask(
@@ -163,8 +168,8 @@ class StickReorderEnv(SingleArmEnv):
 
             @sensor(modality="object")
             def stick_quat(obs_cache, idx=i):
-                return T.convert_quat(
-                    self.sim.data.body_xquat[self.stick_body_ids[idx]], to="xyzw"
+                return convert_quat(
+                    np.array(self.sim.data.body_xquat[self.stick_body_ids[idx]]), to="xyzw"
                 )
 
             @sensor(modality="object")
@@ -191,13 +196,14 @@ class StickReorderEnv(SingleArmEnv):
 
     def _reset_internal(self):
         super()._reset_internal()
-        self.placement_initializer.reset()
-        object_placements = self.placement_initializer.sample()
-        for obj_pos, obj_quat, obj in object_placements.values():
-            self.sim.data.set_joint_qpos(
-                obj.joints[0],
-                np.concatenate([np.array(obj_pos), np.array(obj_quat)]),
-            )
+        if not self.deterministic_reset:
+            self.placement_initializer.reset()
+            object_placements = self.placement_initializer.sample()
+            for obj_pos, obj_quat, obj in object_placements.values():
+                self.sim.data.set_joint_qpos(
+                    obj.joints[0],
+                    np.concatenate([np.array(obj_pos), np.array(obj_quat)]),
+                )
 
     # ------------------------------------------------------------------
     # Reward & termination
