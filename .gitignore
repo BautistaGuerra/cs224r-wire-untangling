@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Logs & checkpoints
+logs/
+runs/
+checkpoints/
+*.log
+wandb/
+
+# Data
+data/
+*.pkl
+*.npy
+*.npz
+*.hdf5
+*.h5
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# MuJoCo / simulation artifacts
+*.mjb
+*.xml.bak
