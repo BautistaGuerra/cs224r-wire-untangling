@@ -4,43 +4,73 @@ Stanford CS224R: Deep Reinforcement Learning (Spring 2026)
 
 ## Project Overview
 
-Training a robot arm to untangle wires using deep RL. In the first approximation, wires are modeled as rigid objects (solid sticks), reducing the problem to contact-rich pick-and-place / reordering manipulation.
+Training a robot arm to untangle wires using deep RL. Wires are modelled as
+rigid sticks, reducing the problem to contact-rich pick-and-place manipulation.
 
-**Simulation engine:** Robosuite (MuJoCo backend)
-
-## Phases
-
-| Phase | Description | Status |
-|-------|-------------|--------|
-| 1 | Rigid wire approximation (sticks) — environment setup | In progress |
-| 2 | RL training (PPO / SAC baseline) | Planned |
-| 3 | Deformable wire simulation | Planned |
+**Simulation engine:** Robosuite (MuJoCo backend)  
+**Robot:** Franka Panda  
+**Algorithm:** SAC (baseline)
 
 ## Setup
 
 ```bash
-# Create virtual environment
 python -m venv .venv
 source .venv/bin/activate
+pip install -e ".[train,dev]"
+```
 
-# Install dependencies
-pip install -r requirements.txt
+## Usage
+
+```bash
+# Sanity-check the environment (headless)
+python scripts/play_env.py
+
+# With MuJoCo viewer
+python scripts/play_env.py --render
+
+# Print Gymnasium observation/action spaces
+python scripts/play_env.py --gym
+
+# Train (SAC, 1M steps)
+python scripts/train.py
+
+# Train with custom config
+python scripts/train.py --config configs/stick_reorder.yaml --timesteps 500000
+
+# Run tests
+pytest tests/ -v
 ```
 
 ## Structure
 
 ```
-source/
-├── envs/           # Custom Robosuite environments
-├── scripts/        # Training and evaluation scripts
-├── configs/        # Experiment configs
-├── tests/          # Environment sanity checks
-└── requirements.txt
+cs224r-wire-untangling/
+├── wire_untangling/
+│   ├── envs/
+│   │   └── stick_reorder.py     # StickReorderEnv
+│   ├── models/objects/
+│   │   └── stick_object.py      # StickObject (thin BoxObject)
+│   └── utils/
+├── scripts/
+│   ├── play_env.py              # render & sanity-check
+│   └── train.py                 # SAC training entry point
+├── configs/
+│   └── stick_reorder.yaml
+└── tests/
+    └── test_stick_reorder.py
 ```
 
-## Simulation Engine Choice
+## Environment
 
-After evaluating ManiSkill 3, Robosuite, IsaacLab, MuJoCo+dm_control, Genesis, and PyBullet:
+`StickReorderEnv` places N sticks randomly on a table. The goal is to move
+each stick to its assigned position in a parallel row arrangement.
 
-- **Robosuite** selected for Phase 1: MuJoCo physics accuracy, native macOS support, clean API for custom rigid-body tasks, strong RL baselines
-- **ManiSkill 3** kept as alternative for GPU-parallel training on Modal if throughput becomes a bottleneck
+Key parameters (see `configs/stick_reorder.yaml`):
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `num_sticks` | 3 | Number of sticks |
+| `stick_length` | 0.18 m | Stick length |
+| `goal_spacing` | 0.06 m | Y-spacing between goal positions |
+| `success_threshold` | 0.03 m | Per-stick distance tolerance |
+| `reward_shaping` | True | Dense reward (−Σdist) + sparse bonus |

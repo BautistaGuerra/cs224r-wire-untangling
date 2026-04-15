@@ -1,0 +1,15 @@
+env:
+  robot: Panda
+  num_sticks: 3
+  stick_length: 0.18
+  stick_radius: 0.012
+  goal_spacing: 0.06
+  success_threshold: 0.03
+  reward_shaping: true
+
+training:
+  algorithm: SAC
+  total_timesteps: 1_000_000
+  learning_rate: 3.0e-4
+  batch_size: 256
+  buffer_size: 1_000_000
