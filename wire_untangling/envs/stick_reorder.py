@@ -197,7 +197,6 @@ class StickReorderEnv(ManipulationEnv):
     def _reset_internal(self):
         super()._reset_internal()
         if not self.deterministic_reset:
-            self.placement_initializer.reset()
             object_placements = self.placement_initializer.sample()
             for obj_pos, obj_quat, obj in object_placements.values():
                 self.sim.data.set_joint_qpos(

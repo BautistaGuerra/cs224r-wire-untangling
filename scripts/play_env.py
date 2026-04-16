@@ -44,6 +44,10 @@ def run_random(env, n_episodes: int = 2, render: bool = False, fps: int = 20):
         done = False
         step = 0
 
+        for i, body_id in enumerate(env.stick_body_ids):
+            pos = env.sim.data.body_xpos[body_id]
+            print(f"  stick{i} initial pos: {pos}")
+
         while not done:
             low, high = env.action_spec
             action = np.random.uniform(low, high)
