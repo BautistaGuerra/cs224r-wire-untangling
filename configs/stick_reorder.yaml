@@ -13,3 +13,11 @@ training:
   learning_rate: 3.0e-4
   batch_size: 256
   buffer_size: 1_000_000
+  seed: 42
+  eval_freq: 10000
+  n_eval_episodes: 10
+  checkpoint_freq: 50000
+
+modal:
+  gpu: "A10G"
+  timeout: 10800   # 3 hours in seconds

@@ -71,6 +71,8 @@ class StickReorderEnv(ManipulationEnv):
         self.goal_spacing = goal_spacing
         self.success_threshold = success_threshold
         self.reward_shaping = reward_shaping
+        self.reward_scale = 1.0   # required by GymWrapper
+        self.use_object_obs = True  # always include stick positions in obs
         self.table_full_size = table_full_size
         self.table_friction = table_friction
         self.table_offset = np.array([0.0, 0.0, 0.8])
@@ -83,10 +85,8 @@ class StickReorderEnv(ManipulationEnv):
 
         super().__init__(robots=robots, **kwargs)
 
-    # ------------------------------------------------------------------
-    # Goal geometry
-    # ------------------------------------------------------------------
 
+    # Goal geometry
     def _compute_goal_positions(self) -> np.ndarray:
         """Return (num_sticks, 3) array of goal xyz positions on the table."""
         total_span = (self.num_sticks - 1) * self.goal_spacing
@@ -102,10 +102,8 @@ class StickReorderEnv(ManipulationEnv):
             ]
         )
 
-    # ------------------------------------------------------------------
-    # Robosuite lifecycle
-    # ------------------------------------------------------------------
 
+    # Robosuite lifecycle
     def _load_model(self):
         super()._load_model()
 
@@ -204,9 +202,7 @@ class StickReorderEnv(ManipulationEnv):
                     np.concatenate([np.array(obj_pos), np.array(obj_quat)]),
                 )
 
-    # ------------------------------------------------------------------
-    # Reward & termination
-    # ------------------------------------------------------------------
+
 
     def reward(self, action=None) -> float:
         reward = 0.0
@@ -221,6 +217,11 @@ class StickReorderEnv(ManipulationEnv):
             reward += 1.0
 
         return reward
+
+    def _post_action(self, action):
+        reward, done, info = super()._post_action(action)
+        info["is_success"] = self._check_success()
+        return reward, done, info
 
     def _check_success(self) -> bool:
         for i, body_id in enumerate(self.stick_body_ids):
