@@ -25,21 +25,46 @@ pip install -e ".[train,dev]"
 # Sanity-check the environment (headless)
 python scripts/play_env.py
 
-# With MuJoCo viewer
-python scripts/play_env.py --render
+# With MuJoCo viewer (macOS: use mjpython instead of python)
+mjpython scripts/play_env.py --render
 
 # Print Gymnasium observation/action spaces
 python scripts/play_env.py --gym
 
-# Train (SAC, 1M steps)
+# Train locally (SAC, reads total_timesteps from config)
 python scripts/train.py
 
-# Train with custom config
-python scripts/train.py --config configs/stick_reorder.yaml --timesteps 500000
+# Train without WandB logging
+python scripts/train.py --no-wandb
+
+# Train with custom config / overrides
+python scripts/train.py --config configs/stick_reorder.yaml --timesteps 500000 --seed 1
+
+# Evaluate a saved checkpoint
+python scripts/eval.py --checkpoint checkpoints/best/best_model.zip
+python scripts/eval.py --checkpoint checkpoints/best/best_model.zip --episodes 100 --seed 0
 
 # Run tests
 pytest tests/ -v
 ```
+
+### Modal GPU training
+
+```bash
+pip install modal
+modal setup   # authenticate once
+
+# Create the WandB secret (one-time)
+modal secret create wandb WANDB_API_KEY=<your_token>
+
+# Smoke test (1000 steps)
+modal run modal_train.py --total-timesteps 1000
+
+# Full run (reads config, GPU type, and timeout from configs/stick_reorder.yaml)
+modal run modal_train.py
+```
+
+GPU type and timeout are set in `configs/stick_reorder.yaml` under `modal.gpu` / `modal.timeout` — no code changes needed to switch hardware.
 
 ## Structure
 
@@ -49,13 +74,16 @@ cs224r-wire-untangling/
 │   ├── envs/
 │   │   └── stick_reorder.py     # StickReorderEnv
 │   ├── models/objects/
-│   │   └── stick_object.py      # StickObject (thin BoxObject)
+│   │   └── stick_object.py      # StickObject (thin BoxObject wrapper)
 │   └── utils/
+│       └── eval.py              # algorithm-agnostic evaluate()
 ├── scripts/
 │   ├── play_env.py              # render & sanity-check
-│   └── train.py                 # SAC training entry point
+│   ├── train.py                 # training entry point
+│   └── eval.py                  # evaluation CLI
 ├── configs/
-│   └── stick_reorder.yaml
+│   └── stick_reorder.yaml       # env, training, and modal params
+├── modal_train.py               # Modal GPU deployment
 └── tests/
     └── test_stick_reorder.py
 ```
