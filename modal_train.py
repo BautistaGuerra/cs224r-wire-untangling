@@ -11,11 +11,19 @@ Usage:
     # Custom config
     modal run modal_train.py --config configs/stick_reorder.yaml --total-timesteps 500000 --seed 1
 
-GPU type and timeout are read from the config file (modal.gpu / modal.timeout).
-To switch GPU, change configs/stick_reorder.yaml modal.gpu and re-run, no code changes needed.
+GPU type and timeout are read from configs/stick_reorder.yaml (modal.gpu / modal.timeout)
+at import time, so changing the YAML is all that's needed to switch hardware.
 """
 
+import yaml
 import modal
+
+# Read modal-specific params from config at import time so the decorator picks them up.
+with open("configs/stick_reorder.yaml") as _f:
+    _cfg = yaml.safe_load(_f)
+_modal_cfg = _cfg.get("modal", {})
+_GPU_TYPE = _modal_cfg.get("gpu", "A10G")
+_TIMEOUT  = _modal_cfg.get("timeout", 3 * 3600)
 
 # Image: debian + osmesa for headless MuJoCo on Linux + all Python deps.
 image = (
@@ -53,11 +61,9 @@ app = modal.App("cs224r-wire-untangling", image=image)
 volume = modal.Volume.from_name("cs224r-checkpoints", create_if_missing=True)
 
 
-# Default resources are overridden at call time via .with_options() in local_entrypoint
-# so that gpu type and timeout are always driven by the config file, not this decorator.
 @app.function(
-    gpu="A10G",
-    timeout=3 * 3600,
+    gpu=_GPU_TYPE,
+    timeout=_TIMEOUT,
     volumes={"/checkpoints": volume},
     secrets=[modal.Secret.from_name("wandb")],  # created via: modal secret create wandb WANDB_API_KEY=<token>
 )
@@ -86,7 +92,6 @@ def train_remote(
     volume.commit()
 
 
-# this local entrypoint parses CLI args and dispatches to Modal
 @app.local_entrypoint()
 def main(
     config: str = "configs/stick_reorder.yaml",
@@ -100,12 +105,8 @@ def main(
     ts = cfg.get("training", {}).get("total_timesteps", total_timesteps)
     sd = cfg.get("training", {}).get("seed", seed)
 
-    # GPU type and timeout come from config, change them there, not here
-    gpu_type = cfg.get("modal", {}).get("gpu", "A10G")
-    timeout = cfg.get("modal", {}).get("timeout", 3 * 3600)
-
-    print(f"Launching Modal training: {ts} steps, seed={sd}, gpu={gpu_type}")
-    train_remote.with_options(gpu=gpu_type, timeout=timeout).remote(
+    print(f"Launching Modal training: {ts} steps, seed={sd}, gpu={_GPU_TYPE}")
+    train_remote.remote(
         config_path=config,
         total_timesteps=ts,
         seed=sd,
