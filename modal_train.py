@@ -96,15 +96,17 @@ def train_remote(
 @app.local_entrypoint()
 def main(
     config: str = "configs/stick_reorder.yaml",
-    total_timesteps: int = 1_000_000,
-    seed: int = 42,
+    total_timesteps: int = None,
+    seed: int = None,
 ):
     import yaml
     with open(config) as f:
         cfg = yaml.safe_load(f)
 
-    ts = cfg.get("training", {}).get("total_timesteps", total_timesteps)
-    sd = cfg.get("training", {}).get("seed", seed)
+    train_cfg = cfg.get("training", {})
+    # Config is the source of truth for defaults; CLI args override when provided.
+    ts = total_timesteps if total_timesteps is not None else train_cfg["total_timesteps"]
+    sd = seed if seed is not None else train_cfg["seed"]
 
     print(f"Launching Modal training: {ts} steps, seed={sd}, gpu={_GPU_TYPE}")
     train_remote.remote(
