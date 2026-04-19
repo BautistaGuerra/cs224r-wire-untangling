@@ -17,7 +17,7 @@ To switch GPU, change configs/stick_reorder.yaml modal.gpu and re-run, no code c
 
 import modal
 
-# Image: debian + osmesa for headless MuJoCo on Linux + all Python deps
+# Image: debian + osmesa for headless MuJoCo on Linux + all Python deps.
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install(
@@ -36,11 +36,15 @@ image = (
         "stable-baselines3>=2.0.0",
         "wandb",
         "pyyaml",
+        "h5py",
     )
     .env({
         "MUJOCO_GL": "osmesa",
         "PYOPENGL_PLATFORM": "osmesa",
     })
+    .add_local_python_source("wire_untangling")
+    .add_local_dir("scripts", remote_path="/root/scripts")
+    .add_local_dir("configs", remote_path="/root/configs")
 )
 
 app = modal.App("cs224r-wire-untangling", image=image)
@@ -48,18 +52,12 @@ app = modal.App("cs224r-wire-untangling", image=image)
 # Persistent volume for checkpoints that survives across runs
 volume = modal.Volume.from_name("cs224r-checkpoints", create_if_missing=True)
 
-# Mount local package so Modal can import wire_untangling and scripts
-local_mount = modal.Mount.from_local_python_packages("wire_untangling")
-scripts_mount = modal.Mount.from_local_dir("scripts", remote_path="/root/scripts")
-configs_mount = modal.Mount.from_local_dir("configs", remote_path="/root/configs")
-
 
 # Default resources are overridden at call time via .with_options() in local_entrypoint
 # so that gpu type and timeout are always driven by the config file, not this decorator.
 @app.function(
     gpu="A10G",
     timeout=3 * 3600,
-    mounts=[local_mount, scripts_mount, configs_mount],
     volumes={"/checkpoints": volume},
     secrets=[modal.Secret.from_name("wandb")],  # created via: modal secret create wandb WANDB_API_KEY=<token>
 )
