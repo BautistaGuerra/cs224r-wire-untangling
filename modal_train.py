@@ -43,6 +43,7 @@ image = (
         "torch>=2.0.0",
         "stable-baselines3>=2.0.0",
         "wandb",
+        "tensorboard",
         "pyyaml",
         "h5py",
     )
