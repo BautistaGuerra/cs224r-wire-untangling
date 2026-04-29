@@ -1,6 +1,9 @@
 """
 Evaluate a trained checkpoint and report success rate.
 
+Loads an SB3 SAC checkpoint, runs it deterministically for N episodes,
+and prints aggregate metrics (success rate, reward, episode length).
+
 Usage:
     python scripts/eval.py --checkpoint checkpoints/best/best_model.zip
     python scripts/eval.py --checkpoint checkpoints/best/best_model.zip --episodes 100 --seed 0
@@ -29,7 +32,7 @@ def main():
     from scripts.train import make_gym_env
     from wire_untangling.utils.eval import evaluate
 
-    # Load model pass env so SB3 can reconstruct observation/action spaces
+    # Load model; pass env so SB3 can reconstruct observation/action spaces
     # TODO: The SAC algorithm is only a baseline, we will replace it with our custom one
     env = Monitor(make_gym_env(config["env"]))
     model = SAC.load(args.checkpoint, env=env)

@@ -4,8 +4,8 @@ Algorithm-agnostic evaluation utilities.
 Works with any policy that exposes:
     action, _state = policy.predict(obs, deterministic=True)
 
-This includes SB3 models, and can be adapted for custom PyTorch policies
-or VLA wrappers by adding a thin .predict() shim.
+This includes SB3 models. For custom PyTorch policies or VLA wrappers,
+add a thin .predict() shim to match this interface.
 """
 
 import numpy as np
@@ -47,6 +47,7 @@ def evaluate(policy, env_cfg: dict, n_episodes: int = 50, seed: int = 42) -> dic
             steps += 1
             last_info = info
 
+        # is_success is injected by StickReorderEnv._post_action
         successes.append(bool(last_info.get("is_success", False)))
         rewards.append(ep_reward)
         lengths.append(steps)

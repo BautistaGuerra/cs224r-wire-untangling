@@ -1,6 +1,20 @@
 """
 SAC training entry point.
 
+Uses Stable-Baselines3's SAC with MlpPolicy (two 256-unit hidden layers).
+SB3 auto-wraps the single Gym env in DummyVecEnv(batch_size=1) internally.
+
+SAC maintains 5 networks:
+    - Actor: obs → action distribution (mean + log_std)
+    - Critic 1 & 2: (obs, action) → Q-value (double Q to reduce overestimation)
+    - Target critic 1 & 2: slow-updated copies for stable bootstrap targets
+
+Training loop (inside model.learn):
+    1. Collect one transition: obs → policy → action → env.step → (next_obs, reward, done)
+    2. Store (obs, action, reward, next_obs, done) in replay buffer (size 1M)
+    3. Sample random batch (256) from buffer, update critics (TD error) and actor (maximize Q - entropy)
+    4. Soft-update target critics: target_Q ← 0.995 * target_Q + 0.005 * Q
+
 Usage:
     python scripts/train.py
     python scripts/train.py --config configs/stick_reorder.yaml
@@ -22,6 +36,9 @@ def load_config(path: str) -> dict:
 
 
 def make_gym_env(env_cfg: dict):
+    """Create a StickReorderEnv wrapped in GymWrapper for SB3 compatibility.
+    GymWrapper flattens the dict observations into a single float32 vector (~53 dims)
+    and translates Robosuite's API to Gymnasium's (obs, reward, terminated, truncated, info)."""
     from robosuite.wrappers import GymWrapper
     from wire_untangling.envs import StickReorderEnv
 
@@ -35,9 +52,9 @@ def make_gym_env(env_cfg: dict):
         reward_shaping=env_cfg.get("reward_shaping", True),
         has_renderer=False,
         has_offscreen_renderer=False,
-        use_camera_obs=False,
+        use_camera_obs=False,          # state-based only, no images
         control_freq=20,
-        horizon=500,
+        horizon=500,                   # max steps per episode
     )
     return GymWrapper(env)
 
@@ -66,10 +83,12 @@ def train(
     os.makedirs(f"{checkpoint_dir}/periodic", exist_ok=True)
     os.makedirs("logs", exist_ok=True)
 
+    # Separate envs for training and evaluation.
+    # Monitor wrapper logs episode reward/length for TensorBoard
     train_env = Monitor(make_gym_env(env_cfg))
-    eval_env = Monitor(make_gym_env(env_cfg))   # separate env — never reuse train env for eval
+    eval_env = Monitor(make_gym_env(env_cfg))
 
-    # Callbacks
+    # EvalCallback: periodically runs the policy deterministically and saves best model
     eval_callback = EvalCallback(
         eval_env,
         best_model_save_path=f"{checkpoint_dir}/best/",
@@ -79,6 +98,7 @@ def train(
         deterministic=True,
         render=False,
     )
+    # CheckpointCallback: saves model at regular intervals regardless of performance
     checkpoint_callback = CheckpointCallback(
         save_freq=train_cfg.get("checkpoint_freq", 50_000),
         save_path=f"{checkpoint_dir}/periodic/",
@@ -105,7 +125,7 @@ def train(
     # TODO: The SAC algorithm is only a baseline to test the whole repo functionality
     # we will replace it with our custom one
     model = SAC(
-        "MlpPolicy",
+        "MlpPolicy",        # 2x256 hidden layers, shared for actor and critic
         train_env,
         seed=seed,
         learning_rate=train_cfg.get("learning_rate", 3e-4),
@@ -117,7 +137,7 @@ def train(
 
     model.learn(total_timesteps=total_timesteps, callback=callbacks)
 
-    # Log best checkpoint as WandB artifact
+    # Log best checkpoint as WandB artifact for easy retrieval
     if run is not None:
         artifact = wandb.Artifact(f"{algo.lower()}-best-model", type="model")
         artifact.add_dir(f"{checkpoint_dir}/best/")
@@ -141,6 +161,7 @@ if __name__ == "__main__":
     config = load_config(args.config)
     train_cfg = config.get("training", {})
 
+    # CLI args override config values when provided
     total_timesteps = args.timesteps or train_cfg.get("total_timesteps", 1_000_000)
     seed = args.seed if args.seed is not None else train_cfg.get("seed", 42)
 

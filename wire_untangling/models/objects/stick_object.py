@@ -1,11 +1,13 @@
 """
 Rigid stick object representing a wire segment.
 
-A thin BoxObject with a fixed aspect ratio.
+A thin BoxObject with a fixed aspect ratio. Part of the Modeling API:
+generates MuJoCo XML for a rigid body with collision and visual geometry.
 """
 
 from robosuite.models.objects.primitive.box import BoxObject
 
+# Visual colors for distinguishing sticks in the renderer
 STICK_COLORS = [
     [0.85, 0.20, 0.15, 1.0],  # red
     [0.15, 0.50, 0.85, 1.0],  # blue
@@ -37,6 +39,7 @@ class StickObject(BoxObject):
         radius: float = 0.012,
         color_idx: int = 0,
     ):
+        # BoxObject size is half-extents: [x, y, z]
         super().__init__(
             name=name,
             size=[length / 2, radius, radius],
