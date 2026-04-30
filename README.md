@@ -102,3 +102,20 @@ Key parameters (see `configs/stick_reorder.yaml`):
 | `goal_spacing` | 0.06 m | Y-spacing between goal positions |
 | `success_threshold` | 0.03 m | Per-stick distance tolerance |
 | `reward_shaping` | True | Dense reward (−Σdist) + sparse bonus |
+
+## Expert Policy and Demonstrations
+
+A scripted pick-and-place expert generates demonstrations for behavior cloning.
+The expert uses proportional control over OSC_POSE deltas with automatic gripper
+yaw alignment to grasp sticks regardless of their orientation (~92% success rate).
+
+```bash
+# Visualize the expert
+python scripts/play_env.py --render --expert
+
+# Collect 200 successful demonstrations
+python scripts/collect_demos.py --num-demos 200 --output data/demos.hdf5
+```
+
+See [docs/expert_policy.md](docs/expert_policy.md) for the full design
+documentation, HDF5 format specification, and tunable parameters.
