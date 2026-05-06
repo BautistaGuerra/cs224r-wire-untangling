@@ -15,6 +15,10 @@ def env():
     e = StickReorderEnv(
         robots="Panda",
         num_sticks=2,
+        # Multi-stick fixture needs a wider placement window than the N=1 default
+        # so the sampler can satisfy the no-overlap constraint at any yaw.
+        init_x_range=(-0.20, 0.20),
+        init_y_range=(-0.20, 0.20),
         has_renderer=False,
         has_offscreen_renderer=False,
         use_camera_obs=False,

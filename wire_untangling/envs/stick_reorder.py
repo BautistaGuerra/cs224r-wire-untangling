@@ -38,9 +38,12 @@ Action space (7 dims, from OSC_POSE controller):
     End-effector delta pose (dx, dy, dz, droll, dpitch, dyaw) + gripper open/close.
 
 Reward:
-    Dense (reward_shaping=True):  -sum of distances from stick centers to goal centers
-    Sparse bonus:                 +1.0 when all sticks within success_threshold
-    Note: only position is checked — orientation is ignored.
+    Dense (reward_shaping=True):  -sum_i (dist_i + lambda_rot * yaw_err_i)
+    Sparse bonus:                 +1.0 when every stick is within success_threshold
+                                  AND yaw_err <= orientation_threshold.
+
+    Yaw error is reduced mod π (the stick is rotationally symmetric about its
+    long axis, so yaw and yaw+π are equivalent).
 """
 
 import numpy as np
@@ -53,6 +56,7 @@ from robosuite.utils.placement_samplers import UniformRandomSampler
 from robosuite.utils.transform_utils import convert_quat
 
 from wire_untangling.models.objects import StickObject
+from wire_untangling.utils.transform import yaw_from_quat_wxyz, yaw_error_mod_pi
 
 
 class StickReorderEnv(ManipulationEnv):
@@ -66,6 +70,11 @@ class StickReorderEnv(ManipulationEnv):
         stick_radius: Stick cross-section half-extent in metres.
         goal_spacing: Y-axis spacing between goal positions in metres.
         success_threshold: Per-stick distance tolerance for task success (m).
+        orientation_threshold: Per-stick yaw tolerance for task success (rad).
+            Yaw is reduced mod π (stick has 180° symmetry).
+        lambda_rot: Weight of the yaw-error term in the dense reward.
+        goal_yaw: Target yaw for every stick at its goal (rad). Default 0
+            aligns sticks with the world x-axis.
         reward_shaping: If True, add dense shaped reward on top of sparse bonus.
         table_full_size: (x, y, z) full size of the table surface.
         table_friction: MuJoCo friction parameters for the table.
@@ -76,10 +85,20 @@ class StickReorderEnv(ManipulationEnv):
         self,
         robots,
         num_sticks: int = 3,
-        stick_length: float = 0.18,
-        stick_radius: float = 0.012,
+        # 1.5 cm-thick × 20 cm-long sticks: closer to the wire-untangling target
+        # than the previous 18 cm × 1.2 cm rod.
+        stick_length: float = 0.20,
+        stick_radius: float = 0.0075,
         goal_spacing: float = 0.06,
         success_threshold: float = 0.03,
+        orientation_threshold: float = np.deg2rad(10.0),
+        lambda_rot: float = 0.1,
+        goal_yaw: float = 0.0,
+        # Initial placement: a narrow band close to the robot but offset from
+        # the goal at x=0. This avoids trivial N=1 resets that already satisfy
+        # the 3 cm success threshold.
+        init_x_range=(-0.12, -0.06),
+        init_y_range=(-0.15, 0.15),
         reward_shaping: bool = True,
         table_full_size=(0.8, 0.8, 0.05),
         table_friction=(1.0, 0.005, 0.0001),
@@ -90,12 +109,19 @@ class StickReorderEnv(ManipulationEnv):
         self.stick_radius = stick_radius
         self.goal_spacing = goal_spacing
         self.success_threshold = success_threshold
+        self.orientation_threshold = orientation_threshold
+        self.lambda_rot = lambda_rot
+        self.goal_yaw = goal_yaw
+        self.init_x_range = tuple(init_x_range)
+        self.init_y_range = tuple(init_y_range)
         self.reward_shaping = reward_shaping
         self.reward_scale = 1.0   # required by GymWrapper
         self.use_object_obs = True  # always include stick positions in obs
         self.table_full_size = table_full_size
         self.table_friction = table_friction
-        # Table center in world frame: (0, 0, 0.8). Surface is at 0.8 + 0.05/2 = 0.825m.
+        # Table TOP in world frame: (0, 0, 0.8). (In this robosuite version
+        # table_offset == arena.table_top_abs, despite what older code/comments
+        # may suggest.)
         self.table_offset = np.array([0.0, 0.0, 0.8])
 
         # Computed before super().__init__ so they're available during setup.
@@ -112,17 +138,23 @@ class StickReorderEnv(ManipulationEnv):
 
     def _compute_goal_positions(self) -> np.ndarray:
         """Return (num_sticks, 3) array of goal xyz positions on the table.
-        Goals are centered at x=0, evenly spaced along y, resting on the surface.
-        Only position is specified — no target orientation."""
+
+        In this robosuite version `table_offset` is the table TOP (matches
+        ``arena.table_top_abs``), not the center. A stick at rest therefore
+        sits at z = table_offset[2] + stick_radius, which is what we use as
+        the goal_z. The previous implementation added ``table_full_size[2]/2``
+        on top, so goal_z floated ~2.5 cm above any reachable rest pose and
+        every demo grazed the 3 cm success_threshold on z alone.
+        """
         total_span = (self.num_sticks - 1) * self.goal_spacing
-        table_surface_z = self.table_offset[2] + self.table_full_size[2] / 2
+        table_top_z = self.table_offset[2]
         return np.array(
             [
                 [
                     0.0,
                     -total_span / 2 + i * self.goal_spacing,
-                    # Stick center sits one radius above the table surface
-                    table_surface_z + self.stick_radius + 0.001,
+                    # Stick center rests one radius above the table top.
+                    table_top_z + self.stick_radius,
                 ]
                 for i in range(self.num_sticks)
             ]
@@ -161,11 +193,14 @@ class StickReorderEnv(ManipulationEnv):
 
         # Placement sampler for random initial positions on the table.
         # ensure_valid_placement=True prevents sticks from overlapping at spawn.
+        # Ranges are narrowed via init_x_range / init_y_range to keep sticks
+        # near the robot (avoids the wrist's long-way-around rotation when
+        # transporting from the far edge of the workspace).
         self.placement_initializer = UniformRandomSampler(
             name="ObjectSampler",
             mujoco_objects=self.stick_objects,
-            x_range=[-0.25, 0.25],
-            y_range=[-0.25, 0.25],
+            x_range=list(self.init_x_range),
+            y_range=list(self.init_y_range),
             rotation=(-np.pi, np.pi),
             rotation_axis="z",
             ensure_object_boundary_in_range=False,
@@ -250,17 +285,25 @@ class StickReorderEnv(ManipulationEnv):
 
     # ── Reward and success ─────────────────────────────────────────────
 
+    def _yaw_error(self, body_id: int) -> float:
+        """Yaw error for a stick body, reduced to [0, π/2] by stick symmetry."""
+        q = self.sim.data.body_xquat[body_id]  # wxyz (MuJoCo)
+        yaw = yaw_from_quat_wxyz(q)
+        return yaw_error_mod_pi(yaw, self.goal_yaw)
+
     def reward(self, action=None) -> float:
         """Compute reward for current state.
-        Dense: negative sum of Euclidean distances from each stick center to its goal.
-        Sparse: +1.0 bonus when all sticks are within success_threshold of goals."""
+        Dense: -sum_i (dist_i + lambda_rot * yaw_err_i).
+        Sparse: +1.0 bonus when all sticks are within success_threshold of goals
+        AND yaw_err <= orientation_threshold."""
         reward = 0.0
 
         if self.reward_shaping:
             for i, body_id in enumerate(self.stick_body_ids):
                 pos = self.sim.data.body_xpos[body_id]
                 dist = np.linalg.norm(pos - self._goal_positions[i])
-                reward -= dist
+                yaw_err = self._yaw_error(body_id)
+                reward -= dist + self.lambda_rot * yaw_err
 
         if self._check_success():
             reward += 1.0
@@ -274,10 +317,12 @@ class StickReorderEnv(ManipulationEnv):
         return reward, done, info
 
     def _check_success(self) -> bool:
-        """All sticks must be within success_threshold of their goal positions.
-        Only checks position (Euclidean distance) — orientation is ignored."""
+        """All sticks must be within success_threshold of their goal positions
+        AND within orientation_threshold of goal_yaw (mod π)."""
         for i, body_id in enumerate(self.stick_body_ids):
             pos = self.sim.data.body_xpos[body_id]
             if np.linalg.norm(pos - self._goal_positions[i]) > self.success_threshold:
+                return False
+            if self._yaw_error(body_id) > self.orientation_threshold:
                 return False
         return True
