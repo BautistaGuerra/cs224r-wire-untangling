@@ -38,4 +38,3 @@ dependencies:
       - robosuite>=1.4.0
       - wandb
       - modal>=0.73
-      - -e .
