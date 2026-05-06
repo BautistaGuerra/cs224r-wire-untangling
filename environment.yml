@@ -25,6 +25,8 @@ dependencies:
   - numpy>=1.24.0
   - h5py
   - pyyaml
+  - imageio>=2.31
+  - imageio-ffmpeg
 
   # Dev / testing
   - pytest>=7.0
