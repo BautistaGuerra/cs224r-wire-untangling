@@ -1,10 +1,15 @@
 env:
   robot: Panda
   num_sticks: 3
-  stick_length: 0.18
-  stick_radius: 0.012
+  stick_length: 0.20             # 20 cm — wire-like
+  stick_radius: 0.0075           # 1.5 cm thick (full cross-section = 2 * radius)
   goal_spacing: 0.06
   success_threshold: 0.03
+  orientation_threshold: 0.1745   # ~10 degrees in radians, mod-π yaw error
+  lambda_rot: 0.1                 # weight on yaw term in dense reward
+  goal_yaw: 0.0                   # all sticks aligned with world x-axis
+  init_x_range: [-0.12, -0.06]    # offset from x=0 goal; prevents already-solved N=1 resets
+  init_y_range: [-0.15, 0.15]     # small y gap; one stick fits with thin spread
   reward_shaping: true
 
 training:
