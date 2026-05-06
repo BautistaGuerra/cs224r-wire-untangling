@@ -11,24 +11,34 @@ The Panda gripper fingers close along the EEF y-axis. To grasp a stick reliably,
 the gripper yaw must be aligned with the stick's heading so the fingers close
 perpendicular to the stick's long axis.
 
+Two yaw alignments happen at different phases:
+    1. APPROACH/DESCEND — eef_yaw is driven toward stick_yaw (mod π) so the
+       fingers can close around the stick.
+    2. TRANSPORT/PLACE — once the stick is gripped, eef rotation rotates the
+       stick rigidly, so eef_yaw is driven so that stick_yaw reaches goal_yaw
+       (mod π). PLACE descent is blocked until yaw is within tolerance.
+
 Exposes .predict(obs, deterministic=True) -> (action, None) for SB3 compatibility.
+The current Phase is published as `policy.phase` so the demo collector can
+record an integer label per timestep alongside the observation.
 """
 
 from collections import OrderedDict
-from enum import Enum, auto
+from enum import IntEnum
 
 import numpy as np
 
 
-class Phase(Enum):
-    APPROACH = auto()
-    DESCEND = auto()
-    GRASP = auto()
-    LIFT = auto()
-    TRANSPORT = auto()
-    PLACE = auto()
-    RELEASE = auto()
-    RETREAT = auto()
+# IntEnum so phase labels can be stored directly in HDF5 as int8.
+class Phase(IntEnum):
+    APPROACH = 0
+    DESCEND = 1
+    GRASP = 2
+    LIFT = 3
+    TRANSPORT = 4
+    PLACE = 5
+    RELEASE = 6
+    RETREAT = 7
 
 
 GRIPPER_OPEN = -1.0
@@ -83,6 +93,17 @@ def _wrap_angle(angle):
     return (angle + np.pi) % (2 * np.pi) - np.pi
 
 
+def _wrap_to_half_pi(angle):
+    """Wrap angle to [-pi/2, pi/2] (stick has 180° symmetry, so yaw and yaw+π
+    are equivalent — we always pick the shorter rotation)."""
+    a = _wrap_angle(angle)
+    if a > np.pi / 2:
+        a -= np.pi
+    elif a < -np.pi / 2:
+        a += np.pi
+    return a
+
+
 class PickPlaceExpertPolicy:
     """Scripted waypoint-based pick-and-place policy for a single stick.
 
@@ -106,7 +127,12 @@ class PickPlaceExpertPolicy:
         eef_z_offset: Vertical offset from stick center to EEF target during grasp.
         pos_threshold: XY distance threshold for phase transitions (metres).
         z_threshold: Z distance threshold for phase transitions (metres).
-        yaw_threshold: Yaw alignment threshold for APPROACH→DESCEND transition (rad).
+        grasp_yaw_threshold: Yaw alignment threshold for APPROACH→DESCEND (rad).
+        place_yaw_threshold: Yaw alignment threshold for TRANSPORT→PLACE (rad).
+            Should be tighter than the env's orientation_threshold so the
+            stick lands within tolerance after a small drift during descent.
+        goal_yaw: Target yaw for the stick at the goal (rad), default 0.
+            Stick has 180° symmetry, so yaw is driven mod π.
         grasp_steps: Steps to hold gripper closed before lifting.
         release_steps: Steps to hold gripper open after placing.
         gain: Proportional gain for position deltas.
@@ -120,7 +146,9 @@ class PickPlaceExpertPolicy:
         eef_z_offset: float = 0.0,
         pos_threshold: float = 0.02,
         z_threshold: float = 0.02,
-        yaw_threshold: float = 0.15,
+        grasp_yaw_threshold: float = 0.15,
+        place_yaw_threshold: float = 0.05,
+        goal_yaw: float = 0.0,
         grasp_steps: int = 25,
         release_steps: int = 10,
         gain: float = 10.0,
@@ -131,7 +159,9 @@ class PickPlaceExpertPolicy:
         self.eef_z_offset = eef_z_offset
         self.pos_threshold = pos_threshold
         self.z_threshold = z_threshold
-        self.yaw_threshold = yaw_threshold
+        self.grasp_yaw_threshold = grasp_yaw_threshold
+        self.place_yaw_threshold = place_yaw_threshold
+        self.goal_yaw = goal_yaw
         self.grasp_steps = grasp_steps
         self.release_steps = release_steps
         self.gain = gain
@@ -139,6 +169,12 @@ class PickPlaceExpertPolicy:
 
         self._phase = Phase.APPROACH
         self._phase_step = 0
+
+    @property
+    def phase(self) -> Phase:
+        """Current phase of the FSM (read-only). Used by the demo collector
+        to label each transition with its source phase."""
+        return self._phase
 
     def reset(self):
         """Reset internal state at the start of each episode."""
@@ -165,21 +201,28 @@ class PickPlaceExpertPolicy:
         grasp_z = stick_pos[2] + self.eef_z_offset
         place_z = goal_pos[2] + self.eef_z_offset
 
-        # Compute yaw alignment: target EEF yaw = stick yaw (mod pi)
-        # so gripper fingers close perpendicular to the stick's long axis
+        # Pre-grasp yaw alignment: drive eef_yaw → stick_yaw (mod π) so the
+        # fingers close perpendicular to the stick's long axis.
         stick_yaw = _quat_to_yaw(stick_quat)
         eef_yaw = _quat_to_yaw(eef_quat)
-        yaw_error = _wrap_angle(stick_yaw - eef_yaw)
-        # Stick has 180° symmetry — take the shorter rotation
-        if yaw_error > np.pi / 2:
-            yaw_error -= np.pi
-        elif yaw_error < -np.pi / 2:
-            yaw_error += np.pi
+        grasp_yaw_error = _wrap_to_half_pi(stick_yaw - eef_yaw)
 
-        action = self._step_phase(eef_pos, stick_pos, goal_pos, grasp_z, place_z, yaw_error)
+        # Goal yaw alignment: once the stick is in the gripper, eef rotation
+        # rotates the stick rigidly. We drive Δyaw to make stick_yaw → goal_yaw
+        # using the *stick's* yaw as the feedback signal, so any residual
+        # eef-vs-stick offset from the imperfect grasp doesn't propagate.
+        place_yaw_error = _wrap_to_half_pi(self.goal_yaw - stick_yaw)
+
+        action = self._step_phase(
+            eef_pos, stick_pos, goal_pos, grasp_z, place_z,
+            grasp_yaw_error, place_yaw_error,
+        )
         return action, None
 
-    def _step_phase(self, eef_pos, stick_pos, goal_pos, grasp_z, place_z, yaw_error):
+    def _step_phase(
+        self, eef_pos, stick_pos, goal_pos, grasp_z, place_z,
+        grasp_yaw_error, place_yaw_error,
+    ):
         """Execute current phase and handle transitions."""
         phase = self._phase
 
@@ -187,10 +230,10 @@ class PickPlaceExpertPolicy:
             target = np.array([stick_pos[0], stick_pos[1], self.lift_height])
             action = self._move_to(eef_pos, target, GRIPPER_OPEN)
             # Rotate gripper to align with stick while approaching
-            action[5] = np.clip(self.yaw_gain * yaw_error, -1.0, 1.0)
+            action[5] = np.clip(self.yaw_gain * grasp_yaw_error, -1.0, 1.0)
             xy_dist = np.linalg.norm(eef_pos[:2] - stick_pos[:2])
             z_dist = abs(eef_pos[2] - self.lift_height)
-            yaw_aligned = abs(yaw_error) < self.yaw_threshold
+            yaw_aligned = abs(grasp_yaw_error) < self.grasp_yaw_threshold
             if xy_dist < self.pos_threshold and z_dist < self.z_threshold and yaw_aligned:
                 self._advance(Phase.DESCEND)
 
@@ -198,7 +241,7 @@ class PickPlaceExpertPolicy:
             target = np.array([stick_pos[0], stick_pos[1], grasp_z])
             action = self._move_to(eef_pos, target, GRIPPER_OPEN)
             # Maintain yaw alignment during descent
-            action[5] = np.clip(self.yaw_gain * yaw_error, -1.0, 1.0)
+            action[5] = np.clip(self.yaw_gain * grasp_yaw_error, -1.0, 1.0)
             if abs(eef_pos[2] - grasp_z) < self.z_threshold:
                 self._advance(Phase.GRASP)
 
@@ -217,14 +260,21 @@ class PickPlaceExpertPolicy:
         elif phase == Phase.TRANSPORT:
             target = np.array([goal_pos[0], goal_pos[1], self.lift_height])
             action = self._move_to(eef_pos, target, GRIPPER_CLOSE)
+            # Rotate stick toward goal_yaw while transporting.
+            action[5] = np.clip(self.yaw_gain * place_yaw_error, -1.0, 1.0)
             xy_dist = np.linalg.norm(eef_pos[:2] - goal_pos[:2])
-            if xy_dist < self.pos_threshold:
+            yaw_aligned = abs(place_yaw_error) < self.place_yaw_threshold
+            # Don't drop into PLACE until both xy AND yaw are settled, so the
+            # stick won't smear sideways or rotate while contacting the table.
+            if xy_dist < self.pos_threshold and yaw_aligned:
                 self._advance(Phase.PLACE)
 
         elif phase == Phase.PLACE:
             # Use goal z, not current stick z (stick is in the gripper)
             target = np.array([goal_pos[0], goal_pos[1], place_z])
             action = self._move_to(eef_pos, target, GRIPPER_CLOSE)
+            # Continue fine yaw correction during the descent.
+            action[5] = np.clip(self.yaw_gain * place_yaw_error, -1.0, 1.0)
             if abs(eef_pos[2] - place_z) < self.z_threshold:
                 self._advance(Phase.RELEASE)
 
