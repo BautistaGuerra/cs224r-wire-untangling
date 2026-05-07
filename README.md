@@ -19,6 +19,10 @@ source .venv/bin/activate
 pip install -e ".[train,dev]"
 ```
 
+For local virtualenv installs, Python dependencies are declared in
+`pyproject.toml`. The conda / mamba CUDA environment is maintained separately in
+`environment.yml` and intentionally does not install this package into the env.
+
 ## Usage
 
 ```bash
