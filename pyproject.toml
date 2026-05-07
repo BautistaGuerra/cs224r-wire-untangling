@@ -13,6 +13,9 @@ dependencies = [
     "gymnasium>=0.29.0",
     "numpy>=1.24.0",
     "h5py",
+    "pyyaml",
+    "imageio>=2.31",
+    "imageio-ffmpeg",
 ]
 
 [project.optional-dependencies]
@@ -26,7 +29,6 @@ dev = [
     "pytest>=7.0",
     "pytest-cov",
     "modal>=0.73",
-    "pyyaml",
 ]
 
 [tool.setuptools.packages.find]
