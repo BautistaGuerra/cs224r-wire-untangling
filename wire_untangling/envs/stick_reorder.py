@@ -76,6 +76,9 @@ class StickReorderEnv(ManipulationEnv):
         goal_yaw: Target yaw for every stick at its goal (rad). Default 0
             aligns sticks with the world x-axis.
         reward_shaping: If True, add dense shaped reward on top of sparse bonus.
+        terminate_on_success: If True (default), end the episode the first time
+            all sticks are within success_threshold. Set False when collecting
+            full trajectories (e.g. for RELEASE/RETREAT-phase analysis).
         table_full_size: (x, y, z) full size of the table surface.
         table_friction: MuJoCo friction parameters for the table.
         **kwargs: Forwarded to ManipulationEnv (horizon, control_freq, renderer, …).
@@ -100,6 +103,7 @@ class StickReorderEnv(ManipulationEnv):
         init_x_range=(-0.12, -0.06),
         init_y_range=(-0.15, 0.15),
         reward_shaping: bool = True,
+        terminate_on_success: bool = True,
         table_full_size=(0.8, 0.8, 0.05),
         table_friction=(1.0, 0.005, 0.0001),
         **kwargs,
@@ -115,6 +119,7 @@ class StickReorderEnv(ManipulationEnv):
         self.init_x_range = tuple(init_x_range)
         self.init_y_range = tuple(init_y_range)
         self.reward_shaping = reward_shaping
+        self.terminate_on_success = terminate_on_success
         self.reward_scale = 1.0   # required by GymWrapper
         self.use_object_obs = True  # always include stick positions in obs
         self.table_full_size = table_full_size
@@ -311,9 +316,14 @@ class StickReorderEnv(ManipulationEnv):
         return reward
 
     def _post_action(self, action):
-        """Inject is_success flag into the info dict after each step."""
+        """Inject is_success flag into the info dict and terminate on success."""
         reward, done, info = super()._post_action(action)
-        info["is_success"] = self._check_success()
+        success = self._check_success()
+        info["is_success"] = success
+        # Terminate the episode the first time success is achieved, so the policy
+        # doesn't waste 300+ steps idling in RETREAT after the task is complete.
+        if success and self.terminate_on_success:
+            done = True
         return reward, done, info
 
     def _check_success(self) -> bool:
