@@ -147,6 +147,31 @@ def test_post_action_emits_is_success(env):
     assert isinstance(info["is_success"], (bool, np.bool_))
 
 
+def test_terminate_on_success_toggle(env):
+    """Env-level early termination should be configurable.
+
+    Demo collection disables this and uses its own consecutive-success hold.
+    """
+    original = env.terminate_on_success
+    low, _ = env.action_spec
+    try:
+        env.terminate_on_success = False
+        env.reset()
+        _set_stick_pose(env, 0, env._goal_positions[0], env.goal_yaw)
+        _, _, done, info = env.step(np.zeros_like(low))
+        assert info["is_success"]
+        assert not done
+
+        env.terminate_on_success = True
+        env.reset()
+        _set_stick_pose(env, 0, env._goal_positions[0], env.goal_yaw)
+        _, _, done, info = env.step(np.zeros_like(low))
+        assert info["is_success"]
+        assert done
+    finally:
+        env.terminate_on_success = original
+
+
 def test_yaw_error_mod_pi_helper():
     from wire_untangling.utils.transform import yaw_error_mod_pi
 
