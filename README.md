@@ -119,3 +119,24 @@ python scripts/collect_demos.py --num-demos 200 --output data/demos.hdf5
 
 See [docs/expert_policy.md](docs/expert_policy.md) for the full design
 documentation, HDF5 format specification, and tunable parameters.
+
+## Recording Videos
+
+Save MP4 videos of any policy for presentations or debugging. Uses offscreen
+rendering — no display or GUI required.
+
+```bash
+# Record the expert policy (1280x720 H.264)
+python scripts/play_env.py --record videos/expert_demo.mp4 --expert --episodes 3
+
+# Record a trained checkpoint
+python scripts/play_env.py --record videos/policy.mp4 --checkpoint checkpoints/best/best_model.zip
+
+# Watch live AND save to disk simultaneously
+python scripts/play_env.py --render --record videos/demo.mp4 --expert
+
+# Custom framerate
+python scripts/play_env.py --record videos/slow.mp4 --expert --fps 10
+```
+
+Requires `imageio` and `imageio-ffmpeg` (included in `environment.yml`).

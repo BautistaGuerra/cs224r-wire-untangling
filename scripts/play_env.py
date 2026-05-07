@@ -17,17 +17,32 @@ Usage:
     python scripts/play_env.py --render --expert
     python scripts/play_env.py --expert --episodes 10   # headless success rate check
 
+    # Record video to disk (no GUI needed)
+    python scripts/play_env.py --record videos/expert_demo.mp4 --expert
+    python scripts/play_env.py --record videos/policy.mp4 --checkpoint checkpoints/best/best_model.zip
+
     # Wrap as Gymnasium env and print observation/action spaces
     python scripts/play_env.py --gym
 """
 
 import argparse
+import os
 import time
 
+import imageio
 import numpy as np
 
 
-def make_env(render: bool = False, num_sticks: int = 3):
+def _make_writer(path: str, fps: int):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    return imageio.get_writer(path, fps=fps, codec="libx264", quality=8)
+
+
+def _grab_frame(env):
+    return env.sim.render(width=1280, height=720, camera_name="agentview")[::-1]
+
+
+def make_env(render: bool = False, record: bool = False, num_sticks: int = 3):
     from wire_untangling.envs import StickReorderEnv
 
     return StickReorderEnv(
@@ -35,15 +50,19 @@ def make_env(render: bool = False, num_sticks: int = 3):
         num_sticks=num_sticks,
         reward_shaping=True,
         has_renderer=render,
-        has_offscreen_renderer=False,
+        has_offscreen_renderer=record,
         use_camera_obs=False,
         control_freq=20,
         horizon=500,
+        camera_names="agentview",
+        camera_heights=720,
+        camera_widths=1280,
     )
 
 
-def run_random(env, n_episodes: int = 2, render: bool = False, fps: int = 20):
+def run_random(env, n_episodes: int = 2, render: bool = False, fps: int = 20, record_path: str = None):
     sleep_time = 1.0 / fps if render else 0.0
+    writer = _make_writer(record_path, fps) if record_path else None
 
     for ep in range(n_episodes):
         obs = env.reset()
@@ -66,13 +85,18 @@ def run_random(env, n_episodes: int = 2, render: bool = False, fps: int = 20):
                 env.render()
                 if sleep_time:
                     time.sleep(sleep_time)
+            if writer:
+                writer.append_data(_grab_frame(env))
 
         print(f"Episode {ep + 1}: steps={step}  total_reward={total_reward:.3f}  success={info.get('success', False)}")
 
+    if writer:
+        writer.close()
+        print(f"Video saved to {record_path}")
     env.close()
 
 
-def run_policy(env, checkpoint: str, n_episodes: int = 2, render: bool = False, fps: int = 20):
+def run_policy(env, checkpoint: str, n_episodes: int = 2, render: bool = False, fps: int = 20, record_path: str = None):
     """Run a trained SB3 policy in the environment.
     Uses GymWrapper to produce the flat obs vector the policy expects,
     while keeping the underlying Robosuite renderer active."""
@@ -82,6 +106,7 @@ def run_policy(env, checkpoint: str, n_episodes: int = 2, render: bool = False, 
     gym_env = GymWrapper(env)
     model = SAC.load(checkpoint, env=gym_env)
     sleep_time = 1.0 / fps if render else 0.0
+    writer = _make_writer(record_path, fps) if record_path else None
 
     for ep in range(n_episodes):
         obs, _ = gym_env.reset()
@@ -104,13 +129,18 @@ def run_policy(env, checkpoint: str, n_episodes: int = 2, render: bool = False, 
                 env.render()
                 if sleep_time:
                     time.sleep(sleep_time)
+            if writer:
+                writer.append_data(_grab_frame(env))
 
         print(f"Episode {ep + 1}: steps={step}  total_reward={total_reward:.3f}  success={info.get('is_success', False)}")
 
+    if writer:
+        writer.close()
+        print(f"Video saved to {record_path}")
     gym_env.close()
 
 
-def run_expert(env, n_episodes: int = 2, render: bool = False, fps: int = 20):
+def run_expert(env, n_episodes: int = 2, render: bool = False, fps: int = 20, record_path: str = None):
     """Run the scripted pick-and-place expert policy.
     Uses GymWrapper for flat observations + underlying Robosuite renderer."""
     from robosuite.wrappers import GymWrapper
@@ -121,6 +151,7 @@ def run_expert(env, n_episodes: int = 2, render: bool = False, fps: int = 20):
     obs_map = build_obs_index_map(gym_env)
     expert = PickPlaceExpertPolicy(obs_map)
     sleep_time = 1.0 / fps if render else 0.0
+    writer = _make_writer(record_path, fps) if record_path else None
 
     successes = 0
     for ep in range(n_episodes):
@@ -145,12 +176,17 @@ def run_expert(env, n_episodes: int = 2, render: bool = False, fps: int = 20):
                 env.render()
                 if sleep_time:
                     time.sleep(sleep_time)
+            if writer:
+                writer.append_data(_grab_frame(env))
 
         success = info.get("is_success", False)
         successes += int(success)
         print(f"Episode {ep + 1}: steps={step}  total_reward={total_reward:.3f}  success={success}  phase={expert._phase.name}")
 
     print(f"\nSuccess rate: {successes}/{n_episodes} ({successes/n_episodes:.0%})")
+    if writer:
+        writer.close()
+        print(f"Video saved to {record_path}")
     gym_env.close()
 
 
@@ -167,6 +203,7 @@ def print_gym_spaces(env):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--render", action="store_true", help="Open MuJoCo viewer (use mjpython on macOS)")
+    parser.add_argument("--record", type=str, default=None, metavar="PATH", help="Save video to .mp4 file (offscreen, no GUI needed)")
     parser.add_argument("--fps", type=int, default=20, help="Target render FPS (default 20)")
     parser.add_argument("--gym", action="store_true", help="Print Gymnasium spaces")
     parser.add_argument("--episodes", type=int, default=2)
@@ -177,13 +214,13 @@ if __name__ == "__main__":
 
     # Expert mode defaults to 1 stick
     num_sticks = args.num_sticks if args.num_sticks is not None else (1 if args.expert else 3)
-    env = make_env(render=args.render, num_sticks=num_sticks)
+    env = make_env(render=args.render, record=bool(args.record), num_sticks=num_sticks)
 
     if args.gym:
         print_gym_spaces(env)
     elif args.expert:
-        run_expert(env, n_episodes=args.episodes, render=args.render, fps=args.fps)
+        run_expert(env, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record)
     elif args.checkpoint:
-        run_policy(env, args.checkpoint, n_episodes=args.episodes, render=args.render, fps=args.fps)
+        run_policy(env, args.checkpoint, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record)
     else:
-        run_random(env, n_episodes=args.episodes, render=args.render, fps=args.fps)
+        run_random(env, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record)
