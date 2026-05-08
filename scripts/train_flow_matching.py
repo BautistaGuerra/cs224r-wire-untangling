@@ -10,6 +10,10 @@ import torch
 from wire_untangling.policies.flow_matching_policy import FlowMatchingPolicy, flow_matching_loss
 
 
+NORMALIZATION = "dataset_standard"
+STD_EPS = 1e-6
+
+
 def load_config(
     env_config: str = "configs/stick_reorder.yaml",
     policy_config: str = "configs/flow_matching.yaml",
@@ -19,6 +23,50 @@ def load_config(
         with open(path) as f:
             cfg.update(yaml.safe_load(f))
     return cfg
+
+
+def normalize_array(values: np.ndarray, mean: np.ndarray,
+                    std: np.ndarray) -> np.ndarray:
+    """Standardize values using dataset statistics."""
+    return (values - mean) / np.maximum(std, STD_EPS)
+
+
+def denormalize_array(values: np.ndarray, mean: np.ndarray,
+                      std: np.ndarray) -> np.ndarray:
+    """Undo dataset standardization."""
+    return values * np.maximum(std, STD_EPS) + mean
+
+
+def make_action_bounds(config: dict) -> tuple[np.ndarray, np.ndarray]:
+    """Create the current one-stick env and return raw action bounds."""
+    from wire_untangling.envs import StickReorderEnv
+
+    env_cfg = dict(config.get("env", {}))
+    env_cfg["num_sticks"] = 1
+    raw_env = StickReorderEnv(
+        robots=env_cfg.get("robot", "Panda"),
+        num_sticks=env_cfg.get("num_sticks", 1),
+        stick_length=env_cfg.get("stick_length", 0.20),
+        stick_radius=env_cfg.get("stick_radius", 0.0075),
+        goal_spacing=env_cfg.get("goal_spacing", 0.06),
+        success_threshold=env_cfg.get("success_threshold", 0.03),
+        orientation_threshold=env_cfg.get("orientation_threshold", np.deg2rad(10.0)),
+        lambda_rot=env_cfg.get("lambda_rot", 0.1),
+        goal_yaw=env_cfg.get("goal_yaw", 0.0),
+        reward_shaping=env_cfg.get("reward_shaping", True),
+        terminate_on_success=env_cfg.get("terminate_on_success", True),
+        has_renderer=False,
+        has_offscreen_renderer=False,
+        use_camera_obs=False,
+        control_freq=20,
+        horizon=env_cfg.get("horizon", 500),
+    )
+    try:
+        low, high = raw_env.action_spec
+        return np.asarray(low, dtype=np.float32), np.asarray(high, dtype=np.float32)
+    finally:
+        raw_env.close()
+
 
 def train(config: dict, demos_path: str, seed: int = 42, use_wandb: bool = True, checkpoint_dir: str = "checkpoints"):
     dpfm_cfg = config.get("dpfm", {})
@@ -34,7 +82,14 @@ def train(config: dict, demos_path: str, seed: int = 42, use_wandb: bool = True,
     lr = float(train_cfg.get("lr", 1e-4))
 
     chunk_size = int(dpfm_cfg.get("action_chunk_horizon", 20))
-    loader, state_dim, action_dim = load_data(demos_path, chunk_size=chunk_size, batch_size=batch_size)
+    execute_steps = int(dpfm_cfg.get("execute_steps", max(1, chunk_size // 2)))
+    action_low, action_high = make_action_bounds(config)
+    loader, state_dim, action_dim, stats = load_data(
+        demos_path,
+        chunk_size=chunk_size,
+        batch_size=batch_size,
+        normalize=True,
+    )
 
     os.makedirs(checkpoint_dir, exist_ok=True)
 
@@ -42,7 +97,13 @@ def train(config: dict, demos_path: str, seed: int = 42, use_wandb: bool = True,
         import wandb
         run = wandb.init(
             project="cs224r-wire-untangling",
-            config={**config, "seed": seed, "state_dim": state_dim, "action_dim": action_dim},
+            config={
+                **config,
+                "seed": seed,
+                "state_dim": state_dim,
+                "action_dim": action_dim,
+                "normalization": NORMALIZATION,
+            },
             tags=["flow-matching", "bc"],
         )
     else:
@@ -81,7 +142,15 @@ def train(config: dict, demos_path: str, seed: int = 42, use_wandb: bool = True,
         "state_dim": state_dim,
         "action_dim": action_dim,
         "pred_horizon": chunk_size,
+        "execute_steps": execute_steps,
         "num_steps": int(dpfm_cfg.get("integration_steps", 10)),
+        "action_low": action_low.tolist(),
+        "action_high": action_high.tolist(),
+        "normalization": NORMALIZATION,
+        "obs_mean": stats["obs_mean"].tolist(),
+        "obs_std": stats["obs_std"].tolist(),
+        "action_mean": stats["action_mean"].tolist(),
+        "action_std": stats["action_std"].tolist(),
     }, save_path)
     print(f"Model saved to {save_path}")
 
@@ -131,14 +200,18 @@ def load_data(
     chunk_size: int = 20,
     batch_size: int = 256,
     shuffle: bool = True,
-) -> tuple[DataLoader, int, int]:
+    normalize: bool = False,
+) -> tuple[DataLoader, int, int, dict[str, np.ndarray]]:
     """Load demos from HDF5, window actions into chunks.
 
     For each timestep t, produces (s_t, [a_t, ..., a_{t+C-1}]). When the
     chunk extends past the episode end, the last action is repeated to fill
     the chunk (same padding strategy as diffusion_policy's SequenceSampler).
 
-    Returns (dataloader, state_dim, action_dim).
+    If ``normalize`` is enabled, observations and action chunks are standardized
+    with dataset mean/std statistics saved for inference.
+
+    Returns (dataloader, state_dim, action_dim, stats).
     """
     import h5py
 
@@ -163,6 +236,12 @@ def load_data(
 
     flat_obs = np.concatenate(all_obs, axis=0)
     flat_actions = np.concatenate(all_actions, axis=0)
+    stats = {
+        "obs_mean": flat_obs.mean(axis=0).astype(np.float32),
+        "obs_std": flat_obs.std(axis=0).astype(np.float32),
+        "action_mean": flat_actions.mean(axis=0).astype(np.float32),
+        "action_std": flat_actions.std(axis=0).astype(np.float32),
+    }
     episode_ends = np.cumsum(episode_lengths)
 
     indices = create_chunk_indices(episode_ends, chunk_size, pad_after=chunk_size - 1)
@@ -177,6 +256,9 @@ def load_data(
         action_chunk[samp_start:samp_end] = action_slice
         if samp_end < chunk_size:
             action_chunk[samp_end:] = action_slice[-1]
+        if normalize:
+            state = normalize_array(state, stats["obs_mean"], stats["obs_std"])
+            action_chunk = normalize_array(action_chunk, stats["action_mean"], stats["action_std"])
 
         chunked_states.append(state)
         chunked_actions.append(action_chunk.flatten())
@@ -184,7 +266,7 @@ def load_data(
     s_tensor = torch.tensor(np.array(chunked_states), dtype=torch.float32)
     a_tensor = torch.tensor(np.array(chunked_actions), dtype=torch.float32)
     loader = DataLoader(TensorDataset(s_tensor, a_tensor), batch_size=batch_size, shuffle=shuffle)
-    return loader, state_dim, action_dim
+    return loader, state_dim, action_dim, stats
 
 def main():
     parser = argparse.ArgumentParser()
