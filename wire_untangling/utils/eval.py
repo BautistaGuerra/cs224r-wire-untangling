@@ -9,6 +9,9 @@ add a thin .predict() shim to match this interface.
 """
 
 import numpy as np
+from stable_baselines3.common.monitor import Monitor
+
+from scripts.train import make_gym_env
 
 
 def evaluate(policy, env_cfg: dict, n_episodes: int = 50, seed: int = 42) -> dict:
@@ -24,10 +27,6 @@ def evaluate(policy, env_cfg: dict, n_episodes: int = 50, seed: int = 42) -> dic
     Returns:
         dict with keys: success_rate, mean_reward, std_reward, mean_length, std_length.
     """
-    from stable_baselines3.common.monitor import Monitor
-
-    from scripts.train import make_gym_env
-
     env = Monitor(make_gym_env(env_cfg))
 
     successes, rewards, lengths = [], [], []

@@ -16,6 +16,10 @@ build/
 venv/
 env/
 ENV/
+# Lock file from `uv` — kept untracked so the repo doesn't pin a single
+# resolver's view of the dependency graph (pyproject.toml + environment.yml
+# are the source of truth for declared deps).
+uv.lock
 
 # Jupyter
 .ipynb_checkpoints/
@@ -27,6 +31,12 @@ runs/
 checkpoints/
 *.log
 wandb/
+
+# Analysis artifacts
+analysis/
+
+# Recorded rollout videos
+videos/
 
 # Data
 data/

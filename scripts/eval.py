@@ -13,6 +13,11 @@ import argparse
 import json
 
 import yaml
+from stable_baselines3 import SAC
+from stable_baselines3.common.monitor import Monitor
+
+from scripts.train import make_gym_env
+from wire_untangling.utils.eval import evaluate
 
 
 def main():
@@ -25,12 +30,6 @@ def main():
 
     with open(args.config) as f:
         config = yaml.safe_load(f)
-
-    from stable_baselines3 import SAC
-    from stable_baselines3.common.monitor import Monitor
-
-    from scripts.train import make_gym_env
-    from wire_untangling.utils.eval import evaluate
 
     # Load model; pass env so SB3 can reconstruct observation/action spaces
     # TODO: The SAC algorithm is only a baseline, we will replace it with our custom one

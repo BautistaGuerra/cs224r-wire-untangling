@@ -11,14 +11,16 @@ Run with:  pytest tests/test_env_readiness.py -v
 
 import numpy as np
 import pytest
+from robosuite.wrappers import GymWrapper
+
+from wire_untangling.envs import StickReorderEnv
+from wire_untangling.utils.transform import yaw_error_mod_pi
 
 
 # ── Module-scoped env fixture (single stick — current scope of BC work) ──
 
 @pytest.fixture(scope="module")
 def env():
-    from wire_untangling.envs import StickReorderEnv
-
     e = StickReorderEnv(
         robots="Panda",
         num_sticks=1,
@@ -57,8 +59,6 @@ def test_action_spec_shape_and_bounds(env):
 
 def test_gym_wrapper_obs_dim(env):
     """For N=1: 50-d proprio + 10-d object (stick_pos 3 + stick_quat 4 + goal_pos 3) = 60."""
-    from robosuite.wrappers import GymWrapper
-
     gym_env = GymWrapper(env)
     obs, _ = gym_env.reset()
     assert obs.shape == (60,), f"Expected (60,) flat obs for N=1, got {obs.shape}"
@@ -173,8 +173,6 @@ def test_terminate_on_success_toggle(env):
 
 
 def test_yaw_error_mod_pi_helper():
-    from wire_untangling.utils.transform import yaw_error_mod_pi
-
     tol = 1e-6
     assert abs(yaw_error_mod_pi(0.0, 0.0)) < tol,                       "yaw=0 → 0"
     assert abs(yaw_error_mod_pi(np.pi, 0.0)) < tol,                     "yaw=π → 0 (symmetric)"

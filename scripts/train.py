@@ -27,7 +27,16 @@ import os
 import random
 
 import numpy as np
+import torch
+import wandb
 import yaml
+from robosuite.wrappers import GymWrapper
+from stable_baselines3 import SAC
+from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
+from stable_baselines3.common.monitor import Monitor
+from wandb.integration.sb3 import WandbCallback
+
+from wire_untangling.envs import StickReorderEnv
 
 
 def load_config(path: str) -> dict:
@@ -39,9 +48,6 @@ def make_gym_env(env_cfg: dict):
     """Create a StickReorderEnv wrapped in GymWrapper for SB3 compatibility.
     GymWrapper flattens the dict observations into a single float32 vector (~53 dims)
     and translates Robosuite's API to Gymnasium's (obs, reward, terminated, truncated, info)."""
-    from robosuite.wrappers import GymWrapper
-    from wire_untangling.envs import StickReorderEnv
-
     env = StickReorderEnv(
         robots=env_cfg.get("robot", "Panda"),
         num_sticks=env_cfg.get("num_sticks", 3),
@@ -66,11 +72,6 @@ def train(
     use_wandb: bool = True,
     checkpoint_dir: str = "checkpoints",
 ):
-    import torch
-    from stable_baselines3 import SAC
-    from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
-    from stable_baselines3.common.monitor import Monitor
-
     # Seed everything for reproducibility
     random.seed(seed)
     np.random.seed(seed)
@@ -107,9 +108,6 @@ def train(
     callbacks = [eval_callback, checkpoint_callback]
 
     if use_wandb:
-        import wandb
-        from wandb.integration.sb3 import WandbCallback
-
         algo = train_cfg.get("algorithm", "SAC")
         run = wandb.init(
             project="cs224r-wire-untangling",

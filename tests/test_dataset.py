@@ -6,6 +6,7 @@ they verify the hashing function and round-trip a synthetic demo through
 HDF5 with all of the new fields (phase, is_success).
 """
 
+import json
 import os
 import sys
 
@@ -18,10 +19,12 @@ import pytest
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(_REPO_ROOT, "scripts"))
 
+# scripts/collect_demos.py lives under sys.path after the insert above; this
+# import must therefore happen *after* the sys.path manipulation.
+from collect_demos import env_config_hash, make_env  # noqa: E402
+
 
 def test_env_config_hash_deterministic():
-    from collect_demos import env_config_hash
-
     cfg = {"num_sticks": 1, "stick_length": 0.18, "goal_yaw": 0.0}
     h1 = env_config_hash(cfg, "1.4.0")
     h2 = env_config_hash(cfg, "1.4.0")
@@ -30,12 +33,34 @@ def test_env_config_hash_deterministic():
 
 
 def test_env_config_hash_distinguishes_inputs():
-    from collect_demos import env_config_hash
-
     cfg_a = {"num_sticks": 1, "stick_length": 0.18}
     cfg_b = {"num_sticks": 1, "stick_length": 0.20}
     assert env_config_hash(cfg_a, "1.4.0") != env_config_hash(cfg_b, "1.4.0")
     assert env_config_hash(cfg_a, "1.4.0") != env_config_hash(cfg_a, "1.5.0")
+
+
+def test_obs_index_map_serialisation():
+    """obs_index_map serialises slices as [start, stop] JSON pairs and
+    round-trips back to slice objects."""
+    obs_map = {
+        "robot0_eef_pos": slice(0, 3),
+        "stick0_pos": slice(20, 23),
+        "goal0_pos": slice(40, 43),
+    }
+    serialised = json.dumps({k: [s.start, s.stop] for k, s in obs_map.items()})
+    parsed = {k: slice(v[0], v[1]) for k, v in json.loads(serialised).items()}
+    assert parsed == obs_map
+
+
+def test_make_env_passes_terminate_on_success():
+    """The --no-terminate-on-success CLI override must flow through make_env."""
+    env_default = make_env({})
+    assert env_default.terminate_on_success is True
+    env_default.close()
+
+    env_off = make_env({"terminate_on_success": False})
+    assert env_off.terminate_on_success is False
+    env_off.close()
 
 
 def test_hdf5_roundtrip_with_phase_and_success(tmp_path):
