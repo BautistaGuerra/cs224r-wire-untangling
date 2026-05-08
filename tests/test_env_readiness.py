@@ -147,25 +147,29 @@ def test_post_action_emits_is_success(env):
     assert isinstance(info["is_success"], (bool, np.bool_))
 
 
-def test_done_true_on_success(env):
-    """Episode must terminate (done=True) when all sticks reach their goals."""
-    env.reset()
-    for i in range(env.num_sticks):
-        _set_stick_pose(env, i, env._goal_positions[i], env.goal_yaw)
-    low, _ = env.action_spec
-    _, _, done, info = env.step(np.zeros_like(low))
-    assert info["is_success"], "Stick is at goal — should report success"
-    assert done, "Episode should terminate when task succeeds"
+def test_terminate_on_success_toggle(env):
+    """Env-level early termination should be configurable.
 
-
-def test_done_false_when_not_success(env):
-    """Episode must NOT terminate on the first step when stick is far from goal."""
-    env.reset()
-    _set_stick_pose(env, 0, env._goal_positions[0] + np.array([0.3, 0.0, 0.0]), env.goal_yaw)
+    Demo collection disables this and uses its own consecutive-success hold.
+    """
+    original = env.terminate_on_success
     low, _ = env.action_spec
-    _, _, done, info = env.step(np.zeros_like(low))
-    assert not info["is_success"]
-    assert not done, "Episode should not terminate when task is incomplete"
+    try:
+        env.terminate_on_success = False
+        env.reset()
+        _set_stick_pose(env, 0, env._goal_positions[0], env.goal_yaw)
+        _, _, done, info = env.step(np.zeros_like(low))
+        assert info["is_success"]
+        assert not done
+
+        env.terminate_on_success = True
+        env.reset()
+        _set_stick_pose(env, 0, env._goal_positions[0], env.goal_yaw)
+        _, _, done, info = env.step(np.zeros_like(low))
+        assert info["is_success"]
+        assert done
+    finally:
+        env.terminate_on_success = original
 
 
 def test_yaw_error_mod_pi_helper():

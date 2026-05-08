@@ -75,6 +75,7 @@ def make_env(env_cfg: dict, render: bool = False):
         lambda_rot=env_cfg.get("lambda_rot", 0.1),
         goal_yaw=env_cfg.get("goal_yaw", 0.0),
         reward_shaping=env_cfg.get("reward_shaping", True),
+        terminate_on_success=env_cfg.get("terminate_on_success", True),
         has_renderer=render,
         has_offscreen_renderer=False,
         use_camera_obs=False,
@@ -213,6 +214,9 @@ def collect(
 
     env_cfg = dict(config.get("env", {}))
     env_cfg["num_sticks"] = 1  # single-stick BC for now
+    # Demo collection uses its own consecutive-success hold so labels include
+    # a short stable terminal segment instead of ending on the first success.
+    env_cfg["terminate_on_success"] = False
 
     raw_env = make_env(env_cfg, render=render)
     gym_env = GymWrapper(raw_env)

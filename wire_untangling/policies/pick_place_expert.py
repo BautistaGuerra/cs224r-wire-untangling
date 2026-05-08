@@ -125,6 +125,10 @@ class PickPlaceExpertPolicy:
                        Obtain via build_obs_index_map(gym_env).
         lift_height: Z height for safe transport above the table (world frame).
         eef_z_offset: Vertical offset from stick center to EEF target during grasp.
+        place_z_offset: Extra vertical offset (typically negative) added to goal_z
+            for the PLACE phase, so the stick is firmly seated on the table
+            before the gripper releases. Without this, the stick falls 1-2cm
+            during gripper opening and often rolls outside the success threshold.
         pos_threshold: XY distance threshold for phase transitions (metres).
         z_threshold: Z distance threshold for phase transitions (metres).
         grasp_yaw_threshold: Yaw alignment threshold for APPROACH→DESCEND (rad).
@@ -144,6 +148,7 @@ class PickPlaceExpertPolicy:
         obs_index_map: dict[str, slice],
         lift_height: float = 0.95,
         eef_z_offset: float = 0.0,
+        place_z_offset: float = -0.008,
         pos_threshold: float = 0.02,
         z_threshold: float = 0.02,
         grasp_yaw_threshold: float = 0.15,
@@ -157,6 +162,7 @@ class PickPlaceExpertPolicy:
         self.obs_map = obs_index_map
         self.lift_height = lift_height
         self.eef_z_offset = eef_z_offset
+        self.place_z_offset = place_z_offset
         self.pos_threshold = pos_threshold
         self.z_threshold = z_threshold
         self.grasp_yaw_threshold = grasp_yaw_threshold
@@ -199,7 +205,10 @@ class PickPlaceExpertPolicy:
         goal_pos = obs[self.obs_map["goal0_pos"]]
 
         grasp_z = stick_pos[2] + self.eef_z_offset
-        place_z = goal_pos[2] + self.eef_z_offset
+        # PLACE descends slightly below goal to seat the stick on the table
+        # before release; otherwise the stick falls during gripper opening
+        # and rolls outside the success threshold.
+        place_z = goal_pos[2] + self.place_z_offset
 
         # Pre-grasp yaw alignment: drive eef_yaw → stick_yaw (mod π) so the
         # fingers close perpendicular to the stick's long axis.
