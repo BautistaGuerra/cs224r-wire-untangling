@@ -31,6 +31,13 @@ import time
 
 import imageio
 import numpy as np
+import torch
+from robosuite.wrappers import GymWrapper
+from stable_baselines3 import SAC
+
+from wire_untangling.envs import StickReorderEnv
+from wire_untangling.policies import PickPlaceExpertPolicy, build_obs_index_map
+from wire_untangling.policies.mlp_bc import MLPBCPolicy
 
 
 def _make_writer(path: str, fps: int):
@@ -43,8 +50,6 @@ def _grab_frame(env):
 
 
 def make_env(render: bool = False, record: bool = False, num_sticks: int = 3):
-    from wire_untangling.envs import StickReorderEnv
-
     return StickReorderEnv(
         robots="Panda",
         num_sticks=num_sticks,
@@ -96,13 +101,96 @@ def run_random(env, n_episodes: int = 2, render: bool = False, fps: int = 20, re
     env.close()
 
 
+class MLPBCModelPolicy:
+    """Plain MLP behavior-cloning policy. Loads a checkpoint produced by
+    ``scripts/train_bc.py`` and applies the train-time state z-score
+    normalisation at inference, so the model sees the same distribution
+    it was trained on. Deterministic: same state always produces same
+    action."""
+
+    def __init__(self, model_path: str):
+        if torch.cuda.is_available():
+            self.device = torch.device("cuda")
+        elif torch.backends.mps.is_available():
+            self.device = torch.device("mps")
+        else:
+            self.device = torch.device("cpu")
+
+        ckpt = torch.load(model_path, map_location=self.device, weights_only=True)
+        self.action_dim = int(ckpt["action_dim"])
+        self.model = MLPBCPolicy(
+            state_dim=int(ckpt["state_dim"]),
+            action_dim=self.action_dim,
+            hidden_dims=tuple(int(h) for h in ckpt["hidden_dims"]),
+            dropout=float(ckpt.get("dropout", 0.0)),
+        ).to(self.device)
+        self.model.load_state_dict(ckpt["model_state_dict"])
+        self.model.eval()
+
+        # State normalisation stats — must match train-time per-dim z-scoring.
+        # Robust to either tensor (current format) or numpy ndarray (legacy).
+        mean = ckpt["state_mean"]
+        std = ckpt["state_std"]
+        mean = mean.detach().clone() if isinstance(mean, torch.Tensor) else torch.tensor(mean)
+        std = std.detach().clone() if isinstance(std, torch.Tensor) else torch.tensor(std)
+        self.state_mean = mean.to(dtype=torch.float32, device=self.device)
+        self.state_std = std.to(dtype=torch.float32, device=self.device)
+
+    def predict(self, obs: np.ndarray) -> np.ndarray:
+        with torch.no_grad():
+            raw = torch.tensor(obs, dtype=torch.float32, device=self.device)
+            state = ((raw - self.state_mean) / self.state_std).unsqueeze(0)
+            action = self.model(state)[0]
+        return action.cpu().numpy()
+
+
+def run_mlp_bc(env, checkpoint: str, n_episodes: int = 2, render: bool = False,
+               fps: int = 20, record_path: str = None):
+    """Run a trained MLP-BC policy through the env and report success rate."""
+    gym_env = GymWrapper(env)
+    policy = MLPBCModelPolicy(checkpoint)
+    sleep_time = 1.0 / fps if render else 0.0
+    writer = _make_writer(record_path, fps) if record_path else None
+
+    successes = 0
+    for ep in range(n_episodes):
+        obs, _ = gym_env.reset()
+        total_reward = 0.0
+        done = False
+        step = 0
+
+        for i, body_id in enumerate(env.stick_body_ids):
+            pos = env.sim.data.body_xpos[body_id]
+            print(f"  stick{i} initial pos: {pos}")
+
+        while not done:
+            action = policy.predict(obs)
+            obs, reward, terminated, truncated, info = gym_env.step(action)
+            done = terminated or truncated
+            total_reward += reward
+            step += 1
+            if render:
+                env.render()
+                if sleep_time:
+                    time.sleep(sleep_time)
+            if writer:
+                writer.append_data(_grab_frame(env))
+
+        success = info.get("is_success", False)
+        successes += int(success)
+        print(f"Episode {ep + 1}: steps={step}  total_reward={total_reward:.3f}  success={success}")
+
+    print(f"\nSuccess rate: {successes}/{n_episodes} ({successes/n_episodes:.0%})")
+    if writer:
+        writer.close()
+        print(f"Video saved to {record_path}")
+    gym_env.close()
+
+
 def run_policy(env, checkpoint: str, n_episodes: int = 2, render: bool = False, fps: int = 20, record_path: str = None):
     """Run a trained SB3 policy in the environment.
     Uses GymWrapper to produce the flat obs vector the policy expects,
     while keeping the underlying Robosuite renderer active."""
-    from robosuite.wrappers import GymWrapper
-    from stable_baselines3 import SAC
-
     gym_env = GymWrapper(env)
     model = SAC.load(checkpoint, env=gym_env)
     sleep_time = 1.0 / fps if render else 0.0
@@ -143,10 +231,6 @@ def run_policy(env, checkpoint: str, n_episodes: int = 2, render: bool = False, 
 def run_expert(env, n_episodes: int = 2, render: bool = False, fps: int = 20, record_path: str = None):
     """Run the scripted pick-and-place expert policy.
     Uses GymWrapper for flat observations + underlying Robosuite renderer."""
-    from robosuite.wrappers import GymWrapper
-
-    from wire_untangling.policies import PickPlaceExpertPolicy, build_obs_index_map
-
     gym_env = GymWrapper(env)
     obs_map = build_obs_index_map(gym_env)
     expert = PickPlaceExpertPolicy(obs_map)
@@ -192,8 +276,6 @@ def run_expert(env, n_episodes: int = 2, render: bool = False, fps: int = 20, re
 
 def print_gym_spaces(env):
     """Wrap in GymWrapper to show what SB3 sees: flat observation and action spaces."""
-    from robosuite.wrappers import GymWrapper
-
     gym_env = GymWrapper(env)
     print("Observation space:", gym_env.observation_space)
     print("Action space:     ", gym_env.action_space)
@@ -208,18 +290,29 @@ if __name__ == "__main__":
     parser.add_argument("--gym", action="store_true", help="Print Gymnasium spaces")
     parser.add_argument("--episodes", type=int, default=2)
     parser.add_argument("--checkpoint", type=str, default=None, help="Path to SB3 .zip checkpoint for trained policy")
+    parser.add_argument("--bc_checkpoint", type=str, default=None,
+                        help="Path to .pt checkpoint for trained MLP-BC policy")
     parser.add_argument("--expert", action="store_true", help="Run scripted pick-and-place expert (single stick)")
     parser.add_argument("--num-sticks", type=int, default=None, help="Override number of sticks")
     args = parser.parse_args()
 
-    # Expert mode defaults to 1 stick
-    num_sticks = args.num_sticks if args.num_sticks is not None else (1 if args.expert else 3)
+    # Expert and MLP-BC modes default to 1 stick — both are trained on N=1
+    # demos, and the env's narrow init_x_range can't fit 3 sticks of length
+    # 0.20m without the placement sampler raising RandomizationError.
+    if args.num_sticks is not None:
+        num_sticks = args.num_sticks
+    elif args.expert or args.bc_checkpoint:
+        num_sticks = 1
+    else:
+        num_sticks = 3
     env = make_env(render=args.render, record=bool(args.record), num_sticks=num_sticks)
 
     if args.gym:
         print_gym_spaces(env)
     elif args.expert:
         run_expert(env, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record)
+    elif args.bc_checkpoint:
+        run_mlp_bc(env, args.bc_checkpoint, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record)
     elif args.checkpoint:
         run_policy(env, args.checkpoint, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record)
     else:

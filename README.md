@@ -120,6 +120,48 @@ python scripts/collect_demos.py --num-demos 200 --output data/demos.hdf5
 See [docs/expert_policy.md](docs/expert_policy.md) for the full design
 documentation, HDF5 format specification, and tunable parameters.
 
+### Canonical training set (team default)
+
+Everyone training a BC variant should use the same demo file so policy
+comparisons aren't confounded by data differences. The reproducible recipe:
+
+```bash
+python scripts/collect_demos.py --num-demos 1000 --output data/demos.hdf5 --seed 42
+```
+
+The seeding utility (`wire_untangling/utils/seeding.py`) makes this
+**bytewise-reproducible**: same seed + same `env_config_hash` ⇒ identical
+HDF5. Each demo file records its `top_seed`, `env_config_hash`,
+`oracle_version`, and `robosuite_version` as root attrs so you can verify
+provenance after the fact. `train_bc.py` prints these at startup and
+supports `--require-config-hash <hash>` / `--require-top-seed <int>` flags
+that hard-fail if the loaded HDF5 doesn't match — useful for CI or when
+sharing checkpoints across machines.
+
+To collect demos that include the full RELEASE phase (useful when training
+sequence models that need terminal-segment coverage):
+
+```bash
+python scripts/collect_demos.py --num-demos 1000 --output data/demos.hdf5 \
+    --seed 42 --no-terminate-on-success
+```
+
+### Train MLP-BC
+
+```bash
+python scripts/train_bc.py --demos-path data/demos.hdf5 \
+    --checkpoint-dir checkpoints/mlp_bc \
+    --require-config-hash <hash from collected file> --require-top-seed 42
+
+# Evaluate (deterministic single-step inference)
+python scripts/play_env.py --bc_checkpoint checkpoints/mlp_bc/mlp_bc_policy.pt --episodes 100
+```
+
+Defaults: 500 epochs, batch 256, lr 1e-3, hidden (256, 256, 256), tanh
+output. ~5 min on Apple Silicon MPS for the canonical 1000-demo dataset.
+On a 200-demo dataset the same recipe gives ~87% N=1 success rate; on
+1000 demos, ~92%.
+
 ## Recording Videos
 
 Save MP4 videos of any policy for presentations or debugging. Uses offscreen
