@@ -1,0 +1,14 @@
+dpfm:
+  # The horizon for action chunking
+  action_chunk_horizon: 20
+  # The number of steps for denoising
+  integration_steps: 10
+
+train:
+  # Size of the training batch
+  batch_size: 2048
+  # Training epochs
+  epochs: 100
+  # Learning rate
+  lr: 1e-4
+  device: gpu
