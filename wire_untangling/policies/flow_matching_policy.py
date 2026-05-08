@@ -1,24 +1,10 @@
-"""Neural network architectures for imitation learning.
-
-This file contains all policy architectures and diffusion/flow schedules.
-
-Structure:
-    Provided (read-only):
-        - SinusoidalPosEmb, Downsample1d, Upsample1d, Conv1dBlock,
-          ConditionalResidualBlock1D, ConditionalUnet1D, TemporalNoisePredictor
-
-    TODO (students implement):
-        - BCPolicy (Problem 1): simple MLP for behavior cloning.
-        - FlowMatchingSchedule.interpolate (Problem 3): training-time interpolation.
-        - FlowMatchingSchedule.sample (Problem 3): inference-time sampling.
-"""
+"""Flow-matching behavior cloning policy for action chunks."""
 
 import math
 from typing import Union
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 # ---------------------------------------------------------------------------
 # Timestep embedding
@@ -40,7 +26,6 @@ class SinusoidalPosEmb(nn.Module):
 # 1-D Temporal U-Net building blocks
 # ---------------------------------------------------------------------------
 
-# A.T. input dimensions BxD.
 class Downsample1d(nn.Module):
     def __init__(self, dim):
         super().__init__()
@@ -214,7 +199,12 @@ class ConditionalUnet1D(nn.Module):
 
 
 class TemporalNoisePredictor(nn.Module):
-    """Wraps ConditionalUnet1D to match the (B, action_dim) interface."""
+    """Wraps ConditionalUnet1D behind a flat action-chunk interface.
+
+    The flow schedule operates on flattened chunks ``(B, T * A)``. The U-Net
+    itself receives temporal chunks ``(B, T, A)`` so action dimensions remain
+    separate channels rather than being treated as one long scalar sequence.
+    """
 
     def __init__(self, state_dim=4, pred_horizon=20, action_dim=1,
                  **unet_kwargs):
@@ -242,18 +232,22 @@ class FlowMatchingSchedule:
     """Conditional Optimal-Transport Flow Matching schedule.
 
     Implements the training-time interpolation and inference-time sampling
-    for a flow matching policy. Compare with DDPMSchedule above.
+    for a flow matching policy.
 
     Args:
-        action_dim: dimensionality of the action (or prediction horizon).
+        action_dim: dimensionality of the flattened action chunk.
         device: torch device string.
         num_steps: number of integration steps for sampling.
+        clamp_sample: Optional final sample clamp. Disabled by default because
+            checkpoint playback clips denormalized actions to env bounds.
     """
 
-    def __init__(self, action_dim=1, device='cpu', num_steps=20):
+    def __init__(self, action_dim=1, device='cpu', num_steps=20,
+                 clamp_sample: bool = False):
         self.action_dim = action_dim
         self.device = device
         self.num_steps = num_steps
+        self.clamp_sample = clamp_sample
 
     def interpolate(self, x1, t):
         """Build noisy sample x_t and the target velocity for training.
@@ -265,40 +259,44 @@ class FlowMatchingSchedule:
         Returns:
             (x_t, velocity) where both have shape (B, action_dim).
         """
-        # ============================================================
-        # TODO: Implement the flow matching interpolation.
-        # ============================================================
         B, action_dim = x1.shape
-        x0 = torch.randn(B, action_dim, device=self.device)
+        x0 = torch.randn(B, action_dim, device=x1.device)
         x_t = t[:, None]*x1 + (1-t[:, None])*x0
         velocity = x1 - x0
         return x_t, velocity
 
     @torch.no_grad()
-    def sample(self, model, state):
+    def sample(self, model, state, initial_noise: torch.Tensor | None = None):
         """Generate samples by integrating the learned velocity field.
 
         Args:
             model: the velocity network, callable as model(x, state, t).
             state: conditioning states, shape (B, state_dim).
+            initial_noise: Optional starting point for the ODE. Passing zeros
+                gives deterministic mean-like samples for unimodal BC policies.
 
         Returns:
-            Sampled actions, shape (B, action_dim), clamped to [0, 1].
+            Sampled normalized action chunks, shape (B, action_dim).
         """
-        # ============================================================
-        # TODO: Implement sampling for flow matching.
-        # ============================================================
-        B, state_dim = state.shape
-        a = torch.randn(B,  self.action_dim, device=self.device)
+        B, _ = state.shape
+        device = state.device
+        if initial_noise is None:
+            a = torch.randn(B, self.action_dim, device=device)
+        else:
+            a = initial_noise.to(device=device, dtype=state.dtype)
+            if a.shape != (B, self.action_dim):
+                raise ValueError(
+                    f"initial_noise must have shape {(B, self.action_dim)}, got {tuple(a.shape)}"
+                )
         dt = 1 / self.num_steps
-        t = torch.zeros(B, dtype=torch.float32, device=self.device)
-        for step in range (0, self.num_steps):
+        t = torch.zeros(B, dtype=torch.float32, device=device)
+        for _ in range(self.num_steps):
             v = model(a, state, t)
             a = a + dt*v
             t = t + dt
-        return torch.clamp(a, 0, 1)
-
-
+        if self.clamp_sample:
+            a = torch.clamp(a, -1.0, 1.0)
+        return a
 
 
 # ---------------------------------------------------------------------------
@@ -322,10 +320,12 @@ class FlowMatchingPolicy(nn.Module):
             state_dim=state_dim, pred_horizon=pred_horizon,
             action_dim=action_dim,
         )
+        self.pred_horizon = pred_horizon
+        self.action_dim = action_dim
         self.schedule = FlowMatchingSchedule(
-            # TODO(Alexta): this is temporary and is designed to fit Action*Chunk into existing
-            # network that expects 1-dimensional actions.
-            action_dim=pred_horizon * action_dim, device=device, num_steps=num_steps,
+            action_dim=pred_horizon * action_dim,
+            device=device,
+            num_steps=num_steps,
         )
 
     def forward(self, noisy_action, state, timestep):

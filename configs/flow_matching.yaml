@@ -1,6 +1,8 @@
 dpfm:
   # The horizon for action chunking
   action_chunk_horizon: 20
+  # Number of sampled chunk actions to execute before re-planning
+  execute_steps: 10
   # The number of steps for denoising
   integration_steps: 10
 

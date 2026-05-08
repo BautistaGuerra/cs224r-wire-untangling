@@ -106,11 +106,14 @@ class ModelPolicy(object):
     def predict(self, obs:torch.Tensor) -> torch.Tensor:
         pass
 
+    def reset(self):
+        pass
+
 
 class SACModelPolicy(ModelPolicy):
     def __init__(self, model_path: str, gym_env):
         super().__init__(model_path, gym_env)
-        self.model = SAC.load(model_path, env=gym_env)
+        self.model = SAC.load(model_path)
         self.gym_env = gym_env
 
     def predict(self, obs:torch.Tensor) ->torch.Tensor:
@@ -120,29 +123,85 @@ class SACModelPolicy(ModelPolicy):
 
 
 class DPFMModelPolicy(ModelPolicy):
-    def __init__(self, model_path: str, gym_env):
+    def __init__(
+        self,
+        model_path: str,
+        gym_env,
+        execute_steps: int | None = None,
+        stochastic: bool = False,
+    ):
         self.gym_env = gym_env
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         checkpoint = torch.load(model_path, map_location=self.device, weights_only=True)
         self.action_dim = int(checkpoint["action_dim"])
+        self.pred_horizon = int(checkpoint["pred_horizon"])
+        self.execute_steps = int(
+            execute_steps if execute_steps is not None
+            else checkpoint.get("execute_steps", max(1, self.pred_horizon // 2))
+        )
+        self.execute_steps = max(1, min(self.execute_steps, self.pred_horizon))
+        self.stochastic = stochastic
+        self.action_low = np.asarray(checkpoint["action_low"], dtype=np.float32)
+        self.action_high = np.asarray(checkpoint["action_high"], dtype=np.float32)
+        self.obs_mean = np.asarray(checkpoint["obs_mean"], dtype=np.float32)
+        self.obs_std = np.asarray(checkpoint["obs_std"], dtype=np.float32)
+        self.action_mean = np.asarray(checkpoint["action_mean"], dtype=np.float32)
+        self.action_std = np.asarray(checkpoint["action_std"], dtype=np.float32)
+        normalization = checkpoint.get("normalization", None)
+        if normalization != "dataset_standard":
+            raise ValueError(
+                f"Unsupported DPFM normalization {normalization!r}; "
+                "expected 'dataset_standard'"
+            )
 
         self.model = FlowMatchingPolicy(
             state_dim=int(checkpoint["state_dim"]),
             action_dim=self.action_dim,
-            pred_horizon=int(checkpoint["pred_horizon"]),
+            pred_horizon=self.pred_horizon,
             num_steps=int(checkpoint["num_steps"]),
             device=self.device,
         ).to(self.device)
         self.model.load_state_dict(checkpoint["model_state_dict"])
         self.model.eval()
+        self._chunk = None
+        self._chunk_idx = 0
 
-    def predict(self, obs: np.ndarray) -> np.ndarray:
+    def reset(self):
+        self._chunk = None
+        self._chunk_idx = 0
+
+    def _denormalize_chunk(self, action_chunk: np.ndarray) -> np.ndarray:
+        raw = action_chunk * np.maximum(self.action_std, 1e-6) + self.action_mean
+        return np.clip(raw, self.action_low, self.action_high)
+
+    def _sample_chunk(self, obs: np.ndarray) -> np.ndarray:
+        obs = (obs - self.obs_mean) / np.maximum(self.obs_std, 1e-6)
         with torch.no_grad():
             state = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
-            action_chunk = self.model.schedule.sample(self.model.model, state)
-        first_action = action_chunk[0, :self.action_dim]
-        return first_action.cpu().numpy()
+            initial_noise = None
+            if not self.stochastic:
+                initial_noise = torch.zeros(
+                    1,
+                    self.pred_horizon * self.action_dim,
+                    dtype=torch.float32,
+                    device=self.device,
+                )
+            flat_chunk = self.model.schedule.sample(
+                self.model.model,
+                state,
+                initial_noise=initial_noise,
+            )
+        chunk = flat_chunk[0].reshape(self.pred_horizon, self.action_dim).cpu().numpy()
+        return self._denormalize_chunk(chunk)
+
+    def predict(self, obs: np.ndarray) -> np.ndarray:
+        if self._chunk is None or self._chunk_idx >= min(self.execute_steps, self.pred_horizon):
+            self._chunk = self._sample_chunk(obs)
+            self._chunk_idx = 0
+        action = self._chunk[self._chunk_idx]
+        self._chunk_idx += 1
+        return action
 
 
 def run_policy(env, policy:ModelPolicy, n_episodes: int = 2, render: bool = False, fps: int = 20, record_path: str = None):
@@ -158,6 +217,7 @@ def run_policy(env, policy:ModelPolicy, n_episodes: int = 2, render: bool = Fals
 
     for ep in range(n_episodes):
         obs, _ = gym_env.reset()
+        policy.reset()
         total_reward = 0.0
         done = False
         step = 0
@@ -259,13 +319,16 @@ if __name__ == "__main__":
     parser.add_argument("--sac_checkpoint", type=str, default=None, help="Path to SB3 .zip checkpoint for trained policy")
     parser.add_argument("--dpfm_checkpoint", type=str, default=None,
                         help="Path to .pth checkpoint for trained DPFM policy")
+    parser.add_argument("--dpfm-execute-steps", type=int, default=None,
+                        help="Override DPFM chunk actions executed before re-planning")
+    parser.add_argument("--dpfm-stochastic", action="store_true",
+                        help="Use random Flow Matching initial noise instead of deterministic zero-noise sampling")
     parser.add_argument("--expert", action="store_true", help="Run scripted pick-and-place expert (single stick)")
     parser.add_argument("--num-sticks", type=int, default=None, help="Override number of sticks")
     args = parser.parse_args()
 
-    # Expert and DPFM modes default to 1 stick
-    # num_sticks = args.num_sticks if args.num_sticks is not None else (1 if (args.expert or args.dpfm_checkpoint) else 3)
-    num_sticks = args.num_sticks if args.num_sticks is not None else (1 if args.expert else 3)
+    # Expert and DPFM modes currently target the one-stick BC setup.
+    num_sticks = args.num_sticks if args.num_sticks is not None else (1 if (args.expert or args.dpfm_checkpoint) else 3)
     env = make_env(render=args.render, record=bool(args.record), num_sticks=num_sticks)
 
     if args.gym:
@@ -276,7 +339,12 @@ if __name__ == "__main__":
         policy = SACModelPolicy(args.sac_checkpoint, env)
         run_policy(env, policy, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record)
     elif args.dpfm_checkpoint:
-        policy = DPFMModelPolicy(args.dpfm_checkpoint, env)
+        policy = DPFMModelPolicy(
+            args.dpfm_checkpoint,
+            env,
+            execute_steps=args.dpfm_execute_steps,
+            stochastic=args.dpfm_stochastic,
+        )
         run_policy(env, policy, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record)
     else:
         run_random(env, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record)
