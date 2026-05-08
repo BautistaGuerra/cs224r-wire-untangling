@@ -13,6 +13,8 @@ dependencies = [
     "gymnasium>=0.29.0",
     "numpy>=1.24.0",
     "h5py",
+    "imageio>=2.31",
+    "imageio-ffmpeg",
 ]
 
 [project.optional-dependencies]

@@ -77,8 +77,8 @@ class StickReorderEnv(ManipulationEnv):
             aligns sticks with the world x-axis.
         reward_shaping: If True, add dense shaped reward on top of sparse bonus.
         terminate_on_success: If True (default), end the episode the first time
-            all sticks are within success_threshold. Set False when collecting
-            full trajectories (e.g. for RELEASE/RETREAT-phase analysis).
+            all sticks satisfy the success predicate. Demo collection disables
+            this and uses its own consecutive-success hold.
         table_full_size: (x, y, z) full size of the table surface.
         table_friction: MuJoCo friction parameters for the table.
         **kwargs: Forwarded to ManipulationEnv (horizon, control_freq, renderer, …).
@@ -316,12 +316,10 @@ class StickReorderEnv(ManipulationEnv):
         return reward
 
     def _post_action(self, action):
-        """Inject is_success flag into the info dict and terminate on success."""
+        """Inject is_success flag into the info dict after each step."""
         reward, done, info = super()._post_action(action)
         success = self._check_success()
         info["is_success"] = success
-        # Terminate the episode the first time success is achieved, so the policy
-        # doesn't waste 300+ steps idling in RETREAT after the task is complete.
         if success and self.terminate_on_success:
             done = True
         return reward, done, info
