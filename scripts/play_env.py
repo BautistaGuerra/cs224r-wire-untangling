@@ -38,6 +38,7 @@ from stable_baselines3 import SAC
 from wire_untangling.envs import StickReorderEnv
 from wire_untangling.policies import PickPlaceExpertPolicy, build_obs_index_map
 from wire_untangling.policies.mlp_bc import MLPBCPolicy
+from wire_untangling.policies.flow_matching_policy import FlowMatchingPolicy
 
 
 def _make_writer(path: str, fps: int):
@@ -101,14 +102,31 @@ def run_random(env, n_episodes: int = 2, render: bool = False, fps: int = 20, re
     env.close()
 
 
-class MLPBCModelPolicy:
-    """Plain MLP behavior-cloning policy. Loads a checkpoint produced by
-    ``scripts/train_bc.py`` and applies the train-time state z-score
-    normalisation at inference, so the model sees the same distribution
-    it was trained on. Deterministic: same state always produces same
-    action."""
+class ModelPolicy(object):
+    def __init__(self, model_path:str, gym_env):
+        pass
 
-    def __init__(self, model_path: str):
+    def predict(self, obs:torch.Tensor) -> torch.Tensor:
+        pass
+
+    def reset(self):
+        pass
+
+
+class SACModelPolicy(ModelPolicy):
+    def __init__(self, model_path: str, gym_env):
+        super().__init__(model_path, gym_env)
+        self.model = SAC.load(model_path)
+        self.gym_env = gym_env
+
+    def predict(self, obs:torch.Tensor) ->torch.Tensor:
+        action, _ = self.model.predict(obs, deterministic=True)
+        return action
+
+
+class MLPBCModelPolicy(ModelPolicy):
+    def __init__(self, model_path: str, gym_env=None):
+        super().__init__(model_path, gym_env)
         if torch.cuda.is_available():
             self.device = torch.device("cuda")
         elif torch.backends.mps.is_available():
@@ -127,8 +145,6 @@ class MLPBCModelPolicy:
         self.model.load_state_dict(ckpt["model_state_dict"])
         self.model.eval()
 
-        # State normalisation stats — must match train-time per-dim z-scoring.
-        # Robust to either tensor (current format) or numpy ndarray (legacy).
         mean = ckpt["state_mean"]
         std = ckpt["state_std"]
         mean = mean.detach().clone() if isinstance(mean, torch.Tensor) else torch.tensor(mean)
@@ -143,18 +159,98 @@ class MLPBCModelPolicy:
             action = self.model(state)[0]
         return action.cpu().numpy()
 
+    def reset(self):
+        pass
 
-def run_mlp_bc(env, checkpoint: str, n_episodes: int = 2, render: bool = False,
-               fps: int = 20, record_path: str = None):
-    """Run a trained MLP-BC policy through the env and report success rate."""
+
+class DPFMModelPolicy(ModelPolicy):
+    def __init__(self, model_path: str, gym_env, execute_steps: int | None = None, stochastic: bool = False):
+        super().__init__(model_path, gym_env)
+        self.gym_env = gym_env
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        checkpoint = torch.load(model_path, map_location=self.device, weights_only=True)
+        self.action_dim = int(checkpoint["action_dim"])
+        self.pred_horizon = int(checkpoint["pred_horizon"])
+        self.execute_steps = int(
+            execute_steps if execute_steps is not None
+            else checkpoint.get("execute_steps", max(1, self.pred_horizon // 2))
+        )
+        self.execute_steps = max(1, min(self.execute_steps, self.pred_horizon))
+        self.stochastic = stochastic
+        self.action_low = np.asarray(checkpoint["action_low"], dtype=np.float32)
+        self.action_high = np.asarray(checkpoint["action_high"], dtype=np.float32)
+        self.obs_mean = np.asarray(checkpoint["obs_mean"], dtype=np.float32)
+        self.obs_std = np.asarray(checkpoint["obs_std"], dtype=np.float32)
+        self.action_mean = np.asarray(checkpoint["action_mean"], dtype=np.float32)
+        self.action_std = np.asarray(checkpoint["action_std"], dtype=np.float32)
+        normalization = checkpoint.get("normalization", None)
+        if normalization != "dataset_standard":
+            raise ValueError(
+                f"Unsupported DPFM normalization {normalization!r}; "
+                "expected 'dataset_standard'"
+            )
+
+        self.model = FlowMatchingPolicy(
+            state_dim=int(checkpoint["state_dim"]),
+            action_dim=self.action_dim,
+            pred_horizon=self.pred_horizon,
+            num_steps=int(checkpoint["num_steps"]),
+            device=self.device,
+        ).to(self.device)
+        self.model.load_state_dict(checkpoint["model_state_dict"])
+        self.model.eval()
+        self._chunk = None
+        self._chunk_idx = 0
+
+    def reset(self):
+        self._chunk = None
+        self._chunk_idx = 0
+
+    def _denormalize_chunk(self, action_chunk: np.ndarray) -> np.ndarray:
+        raw = action_chunk * np.maximum(self.action_std, 1e-6) + self.action_mean
+        return np.clip(raw, self.action_low, self.action_high)
+
+    def _sample_chunk(self, obs: np.ndarray) -> np.ndarray:
+        obs = (obs - self.obs_mean) / np.maximum(self.obs_std, 1e-6)
+        with torch.no_grad():
+            state = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
+            initial_noise = None
+            if not self.stochastic:
+                initial_noise = torch.zeros(
+                    1,
+                    self.pred_horizon * self.action_dim,
+                    dtype=torch.float32,
+                    device=self.device,
+                )
+            flat_chunk = self.model.schedule.sample(
+                self.model.model,
+                state,
+                initial_noise=initial_noise,
+            )
+        chunk = flat_chunk[0].reshape(self.pred_horizon, self.action_dim).cpu().numpy()
+        return self._denormalize_chunk(chunk)
+
+    def predict(self, obs: np.ndarray) -> np.ndarray:
+        if self._chunk is None or self._chunk_idx >= min(self.execute_steps, self.pred_horizon):
+            self._chunk = self._sample_chunk(obs)
+            self._chunk_idx = 0
+        action = self._chunk[self._chunk_idx]
+        self._chunk_idx += 1
+        return action
+
+
+def run_policy(env, policy:ModelPolicy, n_episodes: int = 2, render: bool = False, fps: int = 20, record_path: str = None):
+    """Run a trained policy in the environment.
+    Uses GymWrapper to produce the flat obs vector the policy expects,
+    while keeping the underlying Robosuite renderer active."""
     gym_env = GymWrapper(env)
-    policy = MLPBCModelPolicy(checkpoint)
     sleep_time = 1.0 / fps if render else 0.0
     writer = _make_writer(record_path, fps) if record_path else None
 
-    successes = 0
     for ep in range(n_episodes):
         obs, _ = gym_env.reset()
+        policy.reset()
         total_reward = 0.0
         done = False
         step = 0
@@ -165,49 +261,6 @@ def run_mlp_bc(env, checkpoint: str, n_episodes: int = 2, render: bool = False,
 
         while not done:
             action = policy.predict(obs)
-            obs, reward, terminated, truncated, info = gym_env.step(action)
-            done = terminated or truncated
-            total_reward += reward
-            step += 1
-            if render:
-                env.render()
-                if sleep_time:
-                    time.sleep(sleep_time)
-            if writer:
-                writer.append_data(_grab_frame(env))
-
-        success = info.get("is_success", False)
-        successes += int(success)
-        print(f"Episode {ep + 1}: steps={step}  total_reward={total_reward:.3f}  success={success}")
-
-    print(f"\nSuccess rate: {successes}/{n_episodes} ({successes/n_episodes:.0%})")
-    if writer:
-        writer.close()
-        print(f"Video saved to {record_path}")
-    gym_env.close()
-
-
-def run_policy(env, checkpoint: str, n_episodes: int = 2, render: bool = False, fps: int = 20, record_path: str = None):
-    """Run a trained SB3 policy in the environment.
-    Uses GymWrapper to produce the flat obs vector the policy expects,
-    while keeping the underlying Robosuite renderer active."""
-    gym_env = GymWrapper(env)
-    model = SAC.load(checkpoint, env=gym_env)
-    sleep_time = 1.0 / fps if render else 0.0
-    writer = _make_writer(record_path, fps) if record_path else None
-
-    for ep in range(n_episodes):
-        obs, _ = gym_env.reset()
-        total_reward = 0.0
-        done = False
-        step = 0
-
-        for i, body_id in enumerate(env.stick_body_ids):
-            pos = env.sim.data.body_xpos[body_id]
-            print(f"  stick{i} initial pos: {pos}")
-
-        while not done:
-            action, _ = model.predict(obs, deterministic=True)
             obs, reward, terminated, truncated, info = gym_env.step(action)
             done = terminated or truncated
             total_reward += reward
@@ -289,22 +342,21 @@ if __name__ == "__main__":
     parser.add_argument("--fps", type=int, default=20, help="Target render FPS (default 20)")
     parser.add_argument("--gym", action="store_true", help="Print Gymnasium spaces")
     parser.add_argument("--episodes", type=int, default=2)
-    parser.add_argument("--checkpoint", type=str, default=None, help="Path to SB3 .zip checkpoint for trained policy")
     parser.add_argument("--bc_checkpoint", type=str, default=None,
                         help="Path to .pt checkpoint for trained MLP-BC policy")
+    parser.add_argument("--sac_checkpoint", type=str, default=None, help="Path to SB3 .zip checkpoint for trained policy")
+    parser.add_argument("--dpfm_checkpoint", type=str, default=None,
+                        help="Path to .pth checkpoint for trained DPFM policy")
+    parser.add_argument("--dpfm-execute-steps", type=int, default=None,
+                        help="Override DPFM chunk actions executed before re-planning")
+    parser.add_argument("--dpfm-stochastic", action="store_true",
+                        help="Use random Flow Matching initial noise instead of deterministic zero-noise sampling")
     parser.add_argument("--expert", action="store_true", help="Run scripted pick-and-place expert (single stick)")
     parser.add_argument("--num-sticks", type=int, default=None, help="Override number of sticks")
     args = parser.parse_args()
 
-    # Expert and MLP-BC modes default to 1 stick — both are trained on N=1
-    # demos, and the env's narrow init_x_range can't fit 3 sticks of length
-    # 0.20m without the placement sampler raising RandomizationError.
-    if args.num_sticks is not None:
-        num_sticks = args.num_sticks
-    elif args.expert or args.bc_checkpoint:
-        num_sticks = 1
-    else:
-        num_sticks = 3
+    # Expert and DPFM modes currently target the one-stick BC setup.
+    num_sticks = args.num_sticks if args.num_sticks is not None else (1 if (args.expert or args.dpfm_checkpoint or args.bc_checkpoint) else 3)
     env = make_env(render=args.render, record=bool(args.record), num_sticks=num_sticks)
 
     if args.gym:
@@ -312,8 +364,18 @@ if __name__ == "__main__":
     elif args.expert:
         run_expert(env, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record)
     elif args.bc_checkpoint:
-        run_mlp_bc(env, args.bc_checkpoint, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record)
-    elif args.checkpoint:
-        run_policy(env, args.checkpoint, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record)
+        policy = MLPBCModelPolicy(args.bc_checkpoint, env)
+        run_policy(env, policy, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record)
+    elif args.sac_checkpoint:
+        policy = SACModelPolicy(args.sac_checkpoint, env)
+        run_policy(env, policy, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record)
+    elif args.dpfm_checkpoint:
+        policy = DPFMModelPolicy(
+            args.dpfm_checkpoint,
+            env,
+            execute_steps=args.dpfm_execute_steps,
+            stochastic=args.dpfm_stochastic,
+        )
+        run_policy(env, policy, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record)
     else:
         run_random(env, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record)
