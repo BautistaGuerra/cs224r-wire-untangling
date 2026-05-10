@@ -6,15 +6,14 @@ distance error vs orientation error vs both. No render.
 import argparse
 
 import numpy as np
+from robosuite.wrappers import GymWrapper
+
+from wire_untangling.envs import StickReorderEnv
+from wire_untangling.policies import PickPlaceExpertPolicy, build_obs_index_map
+from wire_untangling.utils.transform import yaw_error_mod_pi, yaw_from_quat_wxyz
 
 
 def main(episodes: int):
-    from robosuite.wrappers import GymWrapper
-
-    from wire_untangling.envs import StickReorderEnv
-    from wire_untangling.policies import PickPlaceExpertPolicy, build_obs_index_map
-    from wire_untangling.utils.transform import yaw_error_mod_pi, yaw_from_quat_wxyz
-
     raw = StickReorderEnv(
         robots="Panda",
         num_sticks=1,

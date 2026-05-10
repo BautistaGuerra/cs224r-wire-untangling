@@ -44,7 +44,14 @@ import sys
 
 import h5py
 import numpy as np
+import robosuite
 import yaml
+from robosuite.wrappers import GymWrapper
+
+from wire_untangling.envs import StickReorderEnv
+from wire_untangling.policies import PickPlaceExpertPolicy, build_obs_index_map
+from wire_untangling.policies.pick_place_expert import Phase
+from wire_untangling.utils.seeding import demo_seed, seed_env
 
 
 ORACLE_VERSION = "1.1-n1-orientation"
@@ -62,8 +69,6 @@ def env_config_hash(env_kwargs: dict, robosuite_version: str) -> str:
 
 
 def make_env(env_cfg: dict, render: bool = False):
-    from wire_untangling.envs import StickReorderEnv
-
     kw = dict(
         robots=env_cfg.get("robot", "Panda"),
         num_sticks=env_cfg.get("num_sticks", 1),
@@ -75,6 +80,10 @@ def make_env(env_cfg: dict, render: bool = False):
         lambda_rot=env_cfg.get("lambda_rot", 0.1),
         goal_yaw=env_cfg.get("goal_yaw", 0.0),
         reward_shaping=env_cfg.get("reward_shaping", True),
+        # When False, episodes continue past success — useful for collecting
+        # full trajectories that include RELEASE/RETREAT phases. The
+        # success_hold_steps mechanism in run_episode still caps total length
+        # so demos don't run the full horizon idling.
         terminate_on_success=env_cfg.get("terminate_on_success", True),
         has_renderer=render,
         has_offscreen_renderer=False,
@@ -102,7 +111,6 @@ def run_episode(
     initial stick placement is deterministic from the seed.
     """
     if seed is not None:
-        from wire_untangling.utils.seeding import seed_env
         seed_env(gym_env.env, seed)
     obs, _ = gym_env.reset()
     expert.reset()
@@ -159,12 +167,6 @@ def smoke_test(env_cfg: dict, n_rollouts: int, threshold: float, top_seed: int):
     Each rollout uses ``demo_seed(top_seed, i)`` so the smoke test is itself
     bytewise reproducible.
     """
-    from robosuite.wrappers import GymWrapper
-
-    from wire_untangling.policies import PickPlaceExpertPolicy, build_obs_index_map
-    from wire_untangling.policies.pick_place_expert import Phase
-    from wire_untangling.utils.seeding import demo_seed
-
     raw_env = make_env(env_cfg, render=False)
     gym_env = GymWrapper(raw_env)
     obs_map = build_obs_index_map(gym_env)
@@ -205,13 +207,8 @@ def collect(
     top_seed: int,
     render: bool = False,
     max_attempts_factor: int = 3,
+    success_hold_steps: int = 5,
 ):
-    import robosuite
-    from robosuite.wrappers import GymWrapper
-
-    from wire_untangling.policies import PickPlaceExpertPolicy, build_obs_index_map
-    from wire_untangling.utils.seeding import demo_seed
-
     env_cfg = dict(config.get("env", {}))
     env_cfg["num_sticks"] = 1  # single-stick BC for now
     # Demo collection uses its own consecutive-success hold so labels include
@@ -237,7 +234,8 @@ def collect(
 
     while len(successful_demos) < num_demos and attempts < max_attempts:
         seed = demo_seed(top_seed, attempts)
-        ep = run_episode(gym_env, expert, render=render, seed=seed)
+        ep = run_episode(gym_env, expert, render=render, seed=seed,
+                         success_hold_steps=success_hold_steps)
         attempts += 1
 
         if ep["final_success"]:
@@ -245,7 +243,6 @@ def collect(
             print(f"  Demo {len(successful_demos)}/{num_demos} collected "
                   f"(attempt {attempts}, seed={seed}, {len(ep['obs'])} steps)")
         else:
-            from wire_untangling.policies.pick_place_expert import Phase
             print(f"  Attempt {attempts} failed "
                   f"(seed={seed}, final_phase={Phase(ep['final_phase']).name}, "
                   f"{len(ep['obs'])} steps) — skipping")
@@ -274,6 +271,12 @@ def collect(
         f.attrs["robosuite_version"] = robosuite.__version__
         f.attrs["oracle_version"] = ORACLE_VERSION
         f.attrs["top_seed"] = int(top_seed)
+        # Save the observable→slice mapping so analysis tools can locate
+        # named obs fields without re-instantiating the env. Slices serialise
+        # as [start, stop] pairs.
+        f.attrs["obs_index_map"] = json.dumps(
+            {name: [s.start, s.stop] for name, s in obs_map.items()}
+        )
 
     print(f"\nSaved {len(successful_demos)} demos ({total_samples} total transitions) "
           f"to {output_path}")
@@ -294,10 +297,30 @@ if __name__ == "__main__":
     parser.add_argument("--smoke-threshold", type=float, default=0.95)
     parser.add_argument("--seed", type=int, default=42,
                         help="Top-level seed. Attempt i uses seed * 1_000_003 + i.")
+    parser.add_argument("--no-terminate-on-success", action="store_true",
+                        help="Let episodes continue past success so demos cover "
+                             "the full RELEASE phase. Auto-bumps "
+                             "--success-hold-steps to 15 unless overridden.")
+    parser.add_argument("--success-hold-steps", type=int, default=None,
+                        help="End an episode after this many consecutive success "
+                             "steps. Default: 5 (terminate quickly), or 15 when "
+                             "--no-terminate-on-success is set — just past the "
+                             "10-step RELEASE phase, before idle RETREAT.")
     args = parser.parse_args()
 
     with open(args.config) as f:
         config = yaml.safe_load(f)
+
+    # CLI overrides on env_cfg
+    if args.no_terminate_on_success:
+        config.setdefault("env", {})["terminate_on_success"] = False
+
+    success_hold_steps = args.success_hold_steps
+    if success_hold_steps is None:
+        # 15 is just past the 10-step RELEASE phase, so demos cover the full
+        # gripper-opening segment plus a few tail steps without entering the
+        # state-independent RETREAT idle (which dilutes per-phase statistics).
+        success_hold_steps = 15 if args.no_terminate_on_success else 5
 
     if args.smoke:
         env_cfg = dict(config.get("env", {}))
@@ -315,4 +338,5 @@ if __name__ == "__main__":
             output_path=args.output,
             top_seed=args.seed,
             render=args.render,
+            success_hold_steps=success_hold_steps,
         )

@@ -6,12 +6,13 @@ Run with:  pytest tests/ -v
 
 import numpy as np
 import pytest
+from robosuite.wrappers import GymWrapper
+
+from wire_untangling.envs import StickReorderEnv
 
 
 @pytest.fixture(scope="module")
 def env():
-    from wire_untangling.envs import StickReorderEnv
-
     e = StickReorderEnv(
         robots="Panda",
         num_sticks=2,
@@ -72,8 +73,6 @@ def test_goal_positions_shape(env):
 
 
 def test_gym_wrapper(env):
-    from robosuite.wrappers import GymWrapper
-
     gym_env = GymWrapper(env)
     obs, _ = gym_env.reset()
     assert obs is not None

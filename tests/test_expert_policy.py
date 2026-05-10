@@ -9,14 +9,15 @@ goal_yaw is plumbed through to the rotation logic.
 
 import numpy as np
 import pytest
+from robosuite.wrappers import GymWrapper
+
+from wire_untangling.envs import StickReorderEnv
+from wire_untangling.policies import PickPlaceExpertPolicy, build_obs_index_map
+from wire_untangling.policies.pick_place_expert import Phase, _wrap_to_half_pi
 
 
 @pytest.fixture(scope="module")
 def gym_env_n1():
-    from robosuite.wrappers import GymWrapper
-
-    from wire_untangling.envs import StickReorderEnv
-
     raw = StickReorderEnv(
         robots="Panda",
         num_sticks=1,
@@ -32,9 +33,6 @@ def gym_env_n1():
 
 
 def test_expert_action_shape_and_phase(gym_env_n1):
-    from wire_untangling.policies import PickPlaceExpertPolicy, build_obs_index_map
-    from wire_untangling.policies.pick_place_expert import Phase
-
     obs_map = build_obs_index_map(gym_env_n1)
     expert = PickPlaceExpertPolicy(obs_map)
 
@@ -49,9 +47,6 @@ def test_expert_action_shape_and_phase(gym_env_n1):
 
 def test_expert_phase_advances(gym_env_n1):
     """Across one rollout, the expert should advance past APPROACH."""
-    from wire_untangling.policies import PickPlaceExpertPolicy, build_obs_index_map
-    from wire_untangling.policies.pick_place_expert import Phase
-
     obs_map = build_obs_index_map(gym_env_n1)
     expert = PickPlaceExpertPolicy(obs_map)
 
@@ -75,8 +70,6 @@ def test_expert_phase_advances(gym_env_n1):
 def test_goal_yaw_plumbed(gym_env_n1):
     """goal_yaw param is used by the place-yaw computation (smoke check that
     nothing crashes when goal_yaw is non-default)."""
-    from wire_untangling.policies import PickPlaceExpertPolicy, build_obs_index_map
-
     obs_map = build_obs_index_map(gym_env_n1)
     expert = PickPlaceExpertPolicy(obs_map, goal_yaw=np.pi / 4)
 
@@ -88,8 +81,6 @@ def test_goal_yaw_plumbed(gym_env_n1):
 
 
 def test_wrap_to_half_pi():
-    from wire_untangling.policies.pick_place_expert import _wrap_to_half_pi
-
     tol = 1e-9
     assert abs(_wrap_to_half_pi(0.0)) < tol
     assert abs(_wrap_to_half_pi(np.pi / 4) - np.pi / 4) < tol

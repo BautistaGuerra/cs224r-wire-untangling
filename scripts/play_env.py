@@ -31,8 +31,13 @@ import time
 
 import imageio
 import numpy as np
-from stable_baselines3 import SAC
 import torch
+from robosuite.wrappers import GymWrapper
+from stable_baselines3 import SAC
+
+from wire_untangling.envs import StickReorderEnv
+from wire_untangling.policies import PickPlaceExpertPolicy, build_obs_index_map
+from wire_untangling.policies.mlp_bc import MLPBCPolicy
 from wire_untangling.policies.flow_matching_policy import FlowMatchingPolicy
 
 
@@ -46,8 +51,6 @@ def _grab_frame(env):
 
 
 def make_env(render: bool = False, record: bool = False, num_sticks: int = 3):
-    from wire_untangling.envs import StickReorderEnv
-
     return StickReorderEnv(
         robots="Panda",
         num_sticks=num_sticks,
@@ -121,15 +124,48 @@ class SACModelPolicy(ModelPolicy):
         return action
 
 
+class MLPBCModelPolicy(ModelPolicy):
+    def __init__(self, model_path: str, gym_env=None):
+        super().__init__(model_path, gym_env)
+        if torch.cuda.is_available():
+            self.device = torch.device("cuda")
+        elif torch.backends.mps.is_available():
+            self.device = torch.device("mps")
+        else:
+            self.device = torch.device("cpu")
+
+        ckpt = torch.load(model_path, map_location=self.device, weights_only=True)
+        self.action_dim = int(ckpt["action_dim"])
+        self.model = MLPBCPolicy(
+            state_dim=int(ckpt["state_dim"]),
+            action_dim=self.action_dim,
+            hidden_dims=tuple(int(h) for h in ckpt["hidden_dims"]),
+            dropout=float(ckpt.get("dropout", 0.0)),
+        ).to(self.device)
+        self.model.load_state_dict(ckpt["model_state_dict"])
+        self.model.eval()
+
+        mean = ckpt["state_mean"]
+        std = ckpt["state_std"]
+        mean = mean.detach().clone() if isinstance(mean, torch.Tensor) else torch.tensor(mean)
+        std = std.detach().clone() if isinstance(std, torch.Tensor) else torch.tensor(std)
+        self.state_mean = mean.to(dtype=torch.float32, device=self.device)
+        self.state_std = std.to(dtype=torch.float32, device=self.device)
+
+    def predict(self, obs: np.ndarray) -> np.ndarray:
+        with torch.no_grad():
+            raw = torch.tensor(obs, dtype=torch.float32, device=self.device)
+            state = ((raw - self.state_mean) / self.state_std).unsqueeze(0)
+            action = self.model(state)[0]
+        return action.cpu().numpy()
+
+    def reset(self):
+        pass
+
 
 class DPFMModelPolicy(ModelPolicy):
-    def __init__(
-        self,
-        model_path: str,
-        gym_env,
-        execute_steps: int | None = None,
-        stochastic: bool = False,
-    ):
+    def __init__(self, model_path: str, gym_env, execute_steps: int | None = None, stochastic: bool = False):
+        super().__init__(model_path, gym_env)
         self.gym_env = gym_env
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -205,13 +241,10 @@ class DPFMModelPolicy(ModelPolicy):
 
 
 def run_policy(env, policy:ModelPolicy, n_episodes: int = 2, render: bool = False, fps: int = 20, record_path: str = None):
-    """Run a trained SB3 policy in the environment.
+    """Run a trained policy in the environment.
     Uses GymWrapper to produce the flat obs vector the policy expects,
     while keeping the underlying Robosuite renderer active."""
-    from robosuite.wrappers import GymWrapper
-
     gym_env = GymWrapper(env)
-    # model = SAC.load(checkpoint, env=gym_env)
     sleep_time = 1.0 / fps if render else 0.0
     writer = _make_writer(record_path, fps) if record_path else None
 
@@ -227,7 +260,6 @@ def run_policy(env, policy:ModelPolicy, n_episodes: int = 2, render: bool = Fals
             print(f"  stick{i} initial pos: {pos}")
 
         while not done:
-            # action, _ = model.predict(obs, deterministic=True)
             action = policy.predict(obs)
             obs, reward, terminated, truncated, info = gym_env.step(action)
             done = terminated or truncated
@@ -252,10 +284,6 @@ def run_policy(env, policy:ModelPolicy, n_episodes: int = 2, render: bool = Fals
 def run_expert(env, n_episodes: int = 2, render: bool = False, fps: int = 20, record_path: str = None):
     """Run the scripted pick-and-place expert policy.
     Uses GymWrapper for flat observations + underlying Robosuite renderer."""
-    from robosuite.wrappers import GymWrapper
-
-    from wire_untangling.policies import PickPlaceExpertPolicy, build_obs_index_map
-
     gym_env = GymWrapper(env)
     obs_map = build_obs_index_map(gym_env)
     expert = PickPlaceExpertPolicy(obs_map)
@@ -301,8 +329,6 @@ def run_expert(env, n_episodes: int = 2, render: bool = False, fps: int = 20, re
 
 def print_gym_spaces(env):
     """Wrap in GymWrapper to show what SB3 sees: flat observation and action spaces."""
-    from robosuite.wrappers import GymWrapper
-
     gym_env = GymWrapper(env)
     print("Observation space:", gym_env.observation_space)
     print("Action space:     ", gym_env.action_space)
@@ -316,6 +342,8 @@ if __name__ == "__main__":
     parser.add_argument("--fps", type=int, default=20, help="Target render FPS (default 20)")
     parser.add_argument("--gym", action="store_true", help="Print Gymnasium spaces")
     parser.add_argument("--episodes", type=int, default=2)
+    parser.add_argument("--bc_checkpoint", type=str, default=None,
+                        help="Path to .pt checkpoint for trained MLP-BC policy")
     parser.add_argument("--sac_checkpoint", type=str, default=None, help="Path to SB3 .zip checkpoint for trained policy")
     parser.add_argument("--dpfm_checkpoint", type=str, default=None,
                         help="Path to .pth checkpoint for trained DPFM policy")
@@ -328,13 +356,16 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Expert and DPFM modes currently target the one-stick BC setup.
-    num_sticks = args.num_sticks if args.num_sticks is not None else (1 if (args.expert or args.dpfm_checkpoint) else 3)
+    num_sticks = args.num_sticks if args.num_sticks is not None else (1 if (args.expert or args.dpfm_checkpoint or args.bc_checkpoint) else 3)
     env = make_env(render=args.render, record=bool(args.record), num_sticks=num_sticks)
 
     if args.gym:
         print_gym_spaces(env)
     elif args.expert:
         run_expert(env, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record)
+    elif args.bc_checkpoint:
+        policy = MLPBCModelPolicy(args.bc_checkpoint, env)
+        run_policy(env, policy, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record)
     elif args.sac_checkpoint:
         policy = SACModelPolicy(args.sac_checkpoint, env)
         run_policy(env, policy, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record)
