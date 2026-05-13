@@ -19,6 +19,8 @@ symmetry.
 
 The N=2 task uses `placement_mode: two_stick_side`.
 
+![N=2 side-specific initial and goal ranges](assets/2_sticks_setup.png)
+
 - `stick0` is blue and always starts / ends on the negative-`Y` side.
 - `stick1` is red and always starts / ends on the positive-`Y` side.
 - Stick identity is fixed by default; the two sides are not interchangeable.
