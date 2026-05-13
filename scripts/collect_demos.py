@@ -14,6 +14,7 @@ HDF5 layout:
             dones      (T,)           bool
             next_obs   (T, obs_dim)   float32
             phase      (T,)           int8       0..7  (Phase IntEnum)
+            active_stick (T,)         int8       active stick index
             is_success (T,)           bool       env._check_success per step
         demo_1/ ...
     attrs:
@@ -54,7 +55,14 @@ from wire_untangling.policies.pick_place_expert import Phase
 from wire_untangling.utils.seeding import demo_seed, seed_env
 
 
-ORACLE_VERSION = "1.1-n1-orientation"
+ORACLE_VERSION_N1 = "1.1-n1-orientation"
+ORACLE_VERSION_N2_SIDE = "1.2-n2-side-goals"
+
+
+def oracle_version_for(env_cfg: dict) -> str:
+    if env_cfg.get("placement_mode") == "two_stick_side":
+        return ORACLE_VERSION_N2_SIDE
+    return ORACLE_VERSION_N1
 
 
 def env_config_hash(env_kwargs: dict, robosuite_version: str) -> str:
@@ -91,10 +99,20 @@ def make_env(env_cfg: dict, render: bool = False):
         control_freq=20,
         horizon=env_cfg.get("horizon", 500),
     )
-    if "init_x_range" in env_cfg:
-        kw["init_x_range"] = tuple(env_cfg["init_x_range"])
-    if "init_y_range" in env_cfg:
-        kw["init_y_range"] = tuple(env_cfg["init_y_range"])
+    optional_env_keys = (
+        "placement_mode",
+        "init_x_range",
+        "init_y_range",
+        "side_init_x_range",
+        "side_init_y_ranges",
+        "side_init_yaw_range",
+        "side_goal_x",
+        "side_goal_y_ranges",
+        "stick_color_indices",
+    )
+    for key in optional_env_keys:
+        if key in env_cfg:
+            kw[key] = env_cfg[key]
     return StickReorderEnv(**kw)
 
 
@@ -116,7 +134,7 @@ def run_episode(
     expert.reset()
 
     ep_obs, ep_actions, ep_rewards, ep_dones = [], [], [], []
-    ep_next_obs, ep_phase, ep_success = [], [], []
+    ep_next_obs, ep_phase, ep_active_stick, ep_success = [], [], [], []
     done = False
     info: dict = {}
     consecutive_success = 0
@@ -125,6 +143,7 @@ def run_episode(
         # Capture phase BEFORE the action — labels the action with the phase
         # that produced it, matching the convention of action-time labels.
         phase_before = int(expert.phase)
+        active_stick_before = int(expert.active_stick)
         action, _ = expert.predict(obs)
         next_obs, reward, terminated, truncated, info = gym_env.step(action)
         step_success = bool(info.get("is_success", False))
@@ -140,6 +159,7 @@ def run_episode(
         ep_dones.append(done)
         ep_next_obs.append(next_obs)
         ep_phase.append(phase_before)
+        ep_active_stick.append(active_stick_before)
         ep_success.append(step_success)
 
         obs = next_obs
@@ -155,13 +175,21 @@ def run_episode(
         "dones": np.array(ep_dones, dtype=bool),
         "next_obs": np.array(ep_next_obs, dtype=np.float32),
         "phase": np.array(ep_phase, dtype=np.int8),
+        "active_stick": np.array(ep_active_stick, dtype=np.int8),
         "is_success": np.array(ep_success, dtype=bool),
         "final_success": final_success,
         "final_phase": int(expert.phase),
+        "final_active_stick": int(expert.active_stick),
     }
 
 
-def smoke_test(env_cfg: dict, n_rollouts: int, threshold: float, top_seed: int):
+def smoke_test(
+    env_cfg: dict,
+    expert_cfg: dict,
+    n_rollouts: int,
+    threshold: float,
+    top_seed: int,
+):
     """Run n_rollouts headless and report success rate. Exit 1 if below threshold.
 
     Each rollout uses ``demo_seed(top_seed, i)`` so the smoke test is itself
@@ -170,7 +198,11 @@ def smoke_test(env_cfg: dict, n_rollouts: int, threshold: float, top_seed: int):
     raw_env = make_env(env_cfg, render=False)
     gym_env = GymWrapper(raw_env)
     obs_map = build_obs_index_map(gym_env)
-    expert = PickPlaceExpertPolicy(obs_map, goal_yaw=env_cfg.get("goal_yaw", 0.0))
+    expert = PickPlaceExpertPolicy(
+        obs_map,
+        goal_yaw=env_cfg.get("goal_yaw", 0.0),
+        stick_order=expert_cfg.get("stick_order"),
+    )
 
     successes = 0
     failure_phases: dict[int, int] = {}
@@ -184,6 +216,7 @@ def smoke_test(env_cfg: dict, n_rollouts: int, threshold: float, top_seed: int):
             failure_phases[ep["final_phase"]] = failure_phases.get(ep["final_phase"], 0) + 1
         print(f"  rollout {i + 1}/{n_rollouts}: seed={seed} "
               f"success={ep['final_success']} "
+              f"final_active_stick={ep['final_active_stick']} "
               f"final_phase={Phase(ep['final_phase']).name}")
 
     gym_env.close()
@@ -208,9 +241,10 @@ def collect(
     render: bool = False,
     max_attempts_factor: int = 3,
     success_hold_steps: int = 5,
+    save_failures: bool = False,
 ):
     env_cfg = dict(config.get("env", {}))
-    env_cfg["num_sticks"] = 1  # single-stick BC for now
+    expert_cfg = dict(config.get("expert", {}))
     # Demo collection uses its own consecutive-success hold so labels include
     # a short stable terminal segment instead of ending on the first success.
     env_cfg["terminate_on_success"] = False
@@ -218,10 +252,15 @@ def collect(
     raw_env = make_env(env_cfg, render=render)
     gym_env = GymWrapper(raw_env)
     obs_map = build_obs_index_map(gym_env)
-    expert = PickPlaceExpertPolicy(obs_map, goal_yaw=env_cfg.get("goal_yaw", 0.0))
+    expert = PickPlaceExpertPolicy(
+        obs_map,
+        goal_yaw=env_cfg.get("goal_yaw", 0.0),
+        stick_order=expert_cfg.get("stick_order"),
+    )
     obs_dim = gym_env.observation_space.shape[0]
 
     cfg_hash = env_config_hash(env_cfg, robosuite.__version__)
+    oracle_version = oracle_version_for(env_cfg)
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
@@ -229,6 +268,7 @@ def collect(
     # success index, so re-running collection with the same top_seed retries
     # the same failed seeds in the same order — bytewise reproducible.
     successful_demos: list[tuple[int, dict]] = []
+    failed_demos: list[tuple[int, dict]] = []
     attempts = 0
     max_attempts = num_demos * max_attempts_factor
 
@@ -243,8 +283,11 @@ def collect(
             print(f"  Demo {len(successful_demos)}/{num_demos} collected "
                   f"(attempt {attempts}, seed={seed}, {len(ep['obs'])} steps)")
         else:
+            if save_failures:
+                failed_demos.append((seed, ep))
             print(f"  Attempt {attempts} failed "
-                  f"(seed={seed}, final_phase={Phase(ep['final_phase']).name}, "
+                  f"(seed={seed}, final_active_stick={ep['final_active_stick']}, "
+                  f"final_phase={Phase(ep['final_phase']).name}, "
                   f"{len(ep['obs'])} steps) — skipping")
 
     gym_env.close()
@@ -259,17 +302,30 @@ def collect(
         for i, (seed, demo) in enumerate(successful_demos):
             grp = data_grp.create_group(f"demo_{i}")
             for key in ("obs", "actions", "rewards", "dones",
-                        "next_obs", "phase", "is_success"):
+                        "next_obs", "phase", "active_stick", "is_success"):
                 grp.create_dataset(key, data=demo[key], compression="gzip")
             grp.attrs["seed"] = int(seed)
 
+        if save_failures and failed_demos:
+            failures_grp = f.create_group("failures")
+            for i, (seed, demo) in enumerate(failed_demos):
+                grp = failures_grp.create_group(f"failure_{i}")
+                for key in ("obs", "actions", "rewards", "dones",
+                            "next_obs", "phase", "active_stick", "is_success"):
+                    grp.create_dataset(key, data=demo[key], compression="gzip")
+                grp.attrs["seed"] = int(seed)
+                grp.attrs["final_phase"] = int(demo["final_phase"])
+                grp.attrs["final_active_stick"] = int(demo["final_active_stick"])
+
         f.attrs["num_demos"] = len(successful_demos)
+        f.attrs["num_failures"] = len(failed_demos)
         f.attrs["obs_dim"] = obs_dim
         f.attrs["total_samples"] = total_samples
         f.attrs["env_config"] = json.dumps(env_cfg)
+        f.attrs["expert_config"] = json.dumps(expert_cfg)
         f.attrs["env_config_hash"] = cfg_hash
         f.attrs["robosuite_version"] = robosuite.__version__
-        f.attrs["oracle_version"] = ORACLE_VERSION
+        f.attrs["oracle_version"] = oracle_version
         f.attrs["top_seed"] = int(top_seed)
         # Save the observable→slice mapping so analysis tools can locate
         # named obs fields without re-instantiating the env. Slices serialise
@@ -280,9 +336,11 @@ def collect(
 
     print(f"\nSaved {len(successful_demos)} demos ({total_samples} total transitions) "
           f"to {output_path}")
-    print(f"  env_config_hash={cfg_hash}  oracle_version={ORACLE_VERSION}  top_seed={top_seed}")
+    print(f"  env_config_hash={cfg_hash}  oracle_version={oracle_version}  top_seed={top_seed}")
     if attempts > len(successful_demos):
         print(f"  ({attempts - len(successful_demos)} failed attempts discarded)")
+    if save_failures:
+        print(f"  saved_failures={len(failed_demos)}")
 
 
 if __name__ == "__main__":
@@ -297,6 +355,11 @@ if __name__ == "__main__":
     parser.add_argument("--smoke-threshold", type=float, default=0.95)
     parser.add_argument("--seed", type=int, default=42,
                         help="Top-level seed. Attempt i uses seed * 1_000_003 + i.")
+    parser.add_argument("--num-sticks", type=int, default=None,
+                        help="Override env.num_sticks from config.")
+    parser.add_argument("--save-failures", action="store_true",
+                        help="Store failed attempts under /failures for diagnostics. "
+                             "BC training still reads only /data.")
     parser.add_argument("--no-terminate-on-success", action="store_true",
                         help="Let episodes continue past success so demos cover "
                              "the full RELEASE phase. Auto-bumps "
@@ -312,6 +375,8 @@ if __name__ == "__main__":
         config = yaml.safe_load(f)
 
     # CLI overrides on env_cfg
+    if args.num_sticks is not None:
+        config.setdefault("env", {})["num_sticks"] = args.num_sticks
     if args.no_terminate_on_success:
         config.setdefault("env", {})["terminate_on_success"] = False
 
@@ -324,9 +389,10 @@ if __name__ == "__main__":
 
     if args.smoke:
         env_cfg = dict(config.get("env", {}))
-        env_cfg["num_sticks"] = 1
+        expert_cfg = dict(config.get("expert", {}))
         smoke_test(
             env_cfg,
+            expert_cfg,
             n_rollouts=args.smoke_n,
             threshold=args.smoke_threshold,
             top_seed=args.seed,
@@ -339,4 +405,5 @@ if __name__ == "__main__":
             top_seed=args.seed,
             render=args.render,
             success_hold_steps=success_hold_steps,
+            save_failures=args.save_failures,
         )
