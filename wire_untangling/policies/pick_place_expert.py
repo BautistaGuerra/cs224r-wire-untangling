@@ -105,7 +105,7 @@ def _wrap_to_half_pi(angle):
 
 
 class PickPlaceExpertPolicy:
-    """Scripted waypoint-based pick-and-place policy for a single stick.
+    """Scripted waypoint-based pick-and-place policy.
 
     8-phase state machine:
         APPROACH  → move above the stick at lift_height, rotate gripper to align
@@ -137,6 +137,9 @@ class PickPlaceExpertPolicy:
             stick lands within tolerance after a small drift during descent.
         goal_yaw: Target yaw for the stick at the goal (rad), default 0.
             Stick has 180° symmetry, so yaw is driven mod π.
+        stick_order: Sequence of stick indices to solve. Defaults to all
+            stick{i} observables present in the observation map, in ascending
+            order. N=1 keeps the previous stick0-only behavior.
         grasp_steps: Steps to hold gripper closed before lifting.
         release_steps: Steps to hold gripper open after placing.
         gain: Proportional gain for position deltas.
@@ -154,6 +157,7 @@ class PickPlaceExpertPolicy:
         grasp_yaw_threshold: float = 0.15,
         place_yaw_threshold: float = 0.05,
         goal_yaw: float = 0.0,
+        stick_order: tuple[int, ...] | list[int] | None = None,
         grasp_steps: int = 25,
         release_steps: int = 10,
         gain: float = 10.0,
@@ -168,6 +172,9 @@ class PickPlaceExpertPolicy:
         self.grasp_yaw_threshold = grasp_yaw_threshold
         self.place_yaw_threshold = place_yaw_threshold
         self.goal_yaw = goal_yaw
+        self.stick_order = tuple(stick_order) if stick_order is not None else self._infer_stick_order()
+        if not self.stick_order:
+            raise ValueError("PickPlaceExpertPolicy requires at least one stick in stick_order")
         self.grasp_steps = grasp_steps
         self.release_steps = release_steps
         self.gain = gain
@@ -175,6 +182,15 @@ class PickPlaceExpertPolicy:
 
         self._phase = Phase.APPROACH
         self._phase_step = 0
+        self._stick_order_idx = 0
+
+    def _infer_stick_order(self) -> tuple[int, ...]:
+        indices = []
+        i = 0
+        while f"stick{i}_pos" in self.obs_map and f"goal{i}_pos" in self.obs_map:
+            indices.append(i)
+            i += 1
+        return tuple(indices)
 
     @property
     def phase(self) -> Phase:
@@ -182,10 +198,16 @@ class PickPlaceExpertPolicy:
         to label each transition with its source phase."""
         return self._phase
 
+    @property
+    def active_stick(self) -> int:
+        """Stick index currently controlled by the FSM."""
+        return self.stick_order[self._stick_order_idx]
+
     def reset(self):
         """Reset internal state at the start of each episode."""
         self._phase = Phase.APPROACH
         self._phase_step = 0
+        self._stick_order_idx = 0
 
     def predict(self, obs, deterministic=True):
         """Compute action from flat observation vector.
@@ -200,9 +222,10 @@ class PickPlaceExpertPolicy:
         obs = np.asarray(obs).flatten()
         eef_pos = obs[self.obs_map["robot0_eef_pos"]]
         eef_quat = obs[self.obs_map["robot0_eef_quat"]]
-        stick_pos = obs[self.obs_map["stick0_pos"]]
-        stick_quat = obs[self.obs_map["stick0_quat"]]
-        goal_pos = obs[self.obs_map["goal0_pos"]]
+        active = self.active_stick
+        stick_pos = obs[self.obs_map[f"stick{active}_pos"]]
+        stick_quat = obs[self.obs_map[f"stick{active}_quat"]]
+        goal_pos = obs[self.obs_map[f"goal{active}_pos"]]
 
         grasp_z = stick_pos[2] + self.eef_z_offset
         # PLACE descends slightly below goal to seat the stick on the table
@@ -297,8 +320,12 @@ class PickPlaceExpertPolicy:
             target = np.array([goal_pos[0], goal_pos[1], self.lift_height])
             action = self._move_to(eef_pos, target, GRIPPER_OPEN)
             if abs(eef_pos[2] - self.lift_height) < self.z_threshold:
-                action = np.zeros(7)
-                action[6] = GRIPPER_OPEN
+                if self._stick_order_idx + 1 < len(self.stick_order):
+                    self._stick_order_idx += 1
+                    self._advance(Phase.APPROACH)
+                else:
+                    action = np.zeros(7)
+                    action[6] = GRIPPER_OPEN
 
         self._phase_step += 1
         return action
