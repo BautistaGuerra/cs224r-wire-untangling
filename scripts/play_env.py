@@ -39,6 +39,7 @@ from wire_untangling.envs import StickReorderEnv
 from wire_untangling.policies import PickPlaceExpertPolicy, build_obs_index_map
 from wire_untangling.policies.mlp_bc import MLPBCPolicy
 from wire_untangling.policies.flow_matching_policy import FlowMatchingPolicy
+from wire_untangling.utils.normalizer import Normalizer
 
 
 def _make_writer(path: str, fps: int):
@@ -145,18 +146,14 @@ class MLPBCModelPolicy(ModelPolicy):
         self.model.load_state_dict(ckpt["model_state_dict"])
         self.model.eval()
 
-        mean = ckpt["state_mean"]
-        std = ckpt["state_std"]
-        mean = mean.detach().clone() if isinstance(mean, torch.Tensor) else torch.tensor(mean)
-        std = std.detach().clone() if isinstance(std, torch.Tensor) else torch.tensor(std)
-        self.state_mean = mean.to(dtype=torch.float32, device=self.device)
-        self.state_std = std.to(dtype=torch.float32, device=self.device)
+        self.obs_norm = Normalizer(loc=ckpt["state_mean"], scale=ckpt["state_std"])
 
     def predict(self, obs: np.ndarray) -> np.ndarray:
         with torch.no_grad():
-            raw = torch.tensor(obs, dtype=torch.float32, device=self.device)
-            state = ((raw - self.state_mean) / self.state_std).unsqueeze(0)
-            action = self.model(state)[0]
+            normed = self.obs_norm.normalize_torch(
+                torch.tensor(obs, dtype=torch.float32, device=self.device),
+            ).unsqueeze(0)
+            action = self.model(normed)[0]
         return action.cpu().numpy()
 
     def reset(self):
@@ -178,18 +175,19 @@ class DPFMModelPolicy(ModelPolicy):
         )
         self.execute_steps = max(1, min(self.execute_steps, self.pred_horizon))
         self.stochastic = stochastic
-        self.action_low = np.asarray(checkpoint["action_low"], dtype=np.float32)
-        self.action_high = np.asarray(checkpoint["action_high"], dtype=np.float32)
-        self.obs_mean = np.asarray(checkpoint["obs_mean"], dtype=np.float32)
-        self.obs_std = np.asarray(checkpoint["obs_std"], dtype=np.float32)
-        self.action_mean = np.asarray(checkpoint["action_mean"], dtype=np.float32)
-        self.action_std = np.asarray(checkpoint["action_std"], dtype=np.float32)
-        normalization = checkpoint.get("normalization", None)
-        if normalization != "dataset_standard":
-            raise ValueError(
-                f"Unsupported DPFM normalization {normalization!r}; "
-                "expected 'dataset_standard'"
-            )
+
+        if "obs_norm" in checkpoint:
+            self.obs_norm = Normalizer.from_state_dict(checkpoint["obs_norm"])
+            self.action_norm = Normalizer.from_state_dict(checkpoint["action_norm"])
+        # else:
+        #     self.obs_norm = Normalizer(
+        #         loc=checkpoint["obs_mean"], scale=checkpoint["obs_std"],
+        #     )
+        #     self.action_norm = Normalizer(
+        #         loc=checkpoint["action_mean"], scale=checkpoint["action_std"],
+        #         clip_low=checkpoint.get("action_low"),
+        #         clip_high=checkpoint.get("action_high"),
+        #     )
 
         self.model = FlowMatchingPolicy(
             state_dim=int(checkpoint["state_dim"]),
@@ -207,12 +205,8 @@ class DPFMModelPolicy(ModelPolicy):
         self._chunk = None
         self._chunk_idx = 0
 
-    def _denormalize_chunk(self, action_chunk: np.ndarray) -> np.ndarray:
-        raw = action_chunk * np.maximum(self.action_std, 1e-6) + self.action_mean
-        return np.clip(raw, self.action_low, self.action_high)
-
     def _sample_chunk(self, obs: np.ndarray) -> np.ndarray:
-        obs = (obs - self.obs_mean) / np.maximum(self.obs_std, 1e-6)
+        obs = self.obs_norm.normalize(obs)
         with torch.no_grad():
             state = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
             initial_noise = None
@@ -229,7 +223,7 @@ class DPFMModelPolicy(ModelPolicy):
                 initial_noise=initial_noise,
             )
         chunk = flat_chunk[0].reshape(self.pred_horizon, self.action_dim).cpu().numpy()
-        return self._denormalize_chunk(chunk)
+        return self.action_norm.denormalize(chunk)
 
     def predict(self, obs: np.ndarray) -> np.ndarray:
         if self._chunk is None or self._chunk_idx >= min(self.execute_steps, self.pred_horizon):
