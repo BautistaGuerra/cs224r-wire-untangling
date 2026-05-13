@@ -120,6 +120,11 @@ python scripts/collect_demos.py --num-demos 200 --output data/demos.hdf5
 See [docs/expert_policy.md](docs/expert_policy.md) for the full design
 documentation, HDF5 format specification, and tunable parameters.
 
+The first two-stick BC task is documented in
+[docs/n2_side_task.md](docs/n2_side_task.md). It fixes blue `stick0` on the
+negative-Y side and red `stick1` on the positive-Y side, with randomized
+side-specific goals and an `active_stick` label in collected demos.
+
 ### Canonical training set (team default)
 
 Everyone training a BC variant should use the same demo file so policy

@@ -97,11 +97,18 @@ class StickReorderEnv(ManipulationEnv):
         orientation_threshold: float = np.deg2rad(10.0),
         lambda_rot: float = 0.1,
         goal_yaw: float = 0.0,
+        placement_mode: str = "legacy",
         # Initial placement: a narrow band close to the robot but offset from
         # the goal at x=0. This avoids trivial N=1 resets that already satisfy
         # the 3 cm success threshold.
         init_x_range=(-0.12, -0.06),
         init_y_range=(-0.15, 0.15),
+        side_init_x_range=(-0.11, 0.11),
+        side_init_y_ranges=((-0.24, -0.12), (0.12, 0.24)),
+        side_init_yaw_range=(-np.deg2rad(30.0), np.deg2rad(30.0)),
+        side_goal_x: float = 0.0,
+        side_goal_y_ranges=((-0.08, -0.02), (0.02, 0.08)),
+        stick_color_indices=None,
         reward_shaping: bool = True,
         terminate_on_success: bool = True,
         table_full_size=(0.8, 0.8, 0.05),
@@ -116,8 +123,14 @@ class StickReorderEnv(ManipulationEnv):
         self.orientation_threshold = orientation_threshold
         self.lambda_rot = lambda_rot
         self.goal_yaw = goal_yaw
+        self.placement_mode = placement_mode
         self.init_x_range = tuple(init_x_range)
         self.init_y_range = tuple(init_y_range)
+        self.side_init_x_range = tuple(side_init_x_range)
+        self.side_init_y_ranges = tuple(tuple(r) for r in side_init_y_ranges)
+        self.side_init_yaw_range = tuple(side_init_yaw_range)
+        self.side_goal_x = float(side_goal_x)
+        self.side_goal_y_ranges = tuple(tuple(r) for r in side_goal_y_ranges)
         self.reward_shaping = reward_shaping
         self.terminate_on_success = terminate_on_success
         self.reward_scale = 1.0   # required by GymWrapper
@@ -130,7 +143,11 @@ class StickReorderEnv(ManipulationEnv):
         self.table_offset = np.array([0.0, 0.0, 0.8])
 
         # Computed before super().__init__ so they're available during setup.
+        self._validate_placement_config()
         self._goal_positions = self._compute_goal_positions()
+        if stick_color_indices is None:
+            stick_color_indices = (1, 0) if self.placement_mode == "two_stick_side" else tuple(range(num_sticks))
+        self.stick_color_indices = tuple(stick_color_indices)
 
         self.stick_objects: list[StickObject] = []
         self.stick_body_ids: list[int] = []
@@ -140,6 +157,15 @@ class StickReorderEnv(ManipulationEnv):
 
 
     # ── Goal geometry ──────────────────────────────────────────────────
+
+    def _validate_placement_config(self):
+        if self.placement_mode not in ("legacy", "two_stick_side"):
+            raise ValueError(f"Unsupported placement_mode={self.placement_mode!r}")
+        if self.placement_mode == "two_stick_side":
+            if self.num_sticks != 2:
+                raise ValueError("placement_mode='two_stick_side' currently requires num_sticks=2")
+            if len(self.side_init_y_ranges) != 2 or len(self.side_goal_y_ranges) != 2:
+                raise ValueError("two_stick_side requires exactly two init and goal y ranges")
 
     def _compute_goal_positions(self) -> np.ndarray:
         """Return (num_sticks, 3) array of goal xyz positions on the table.
@@ -151,6 +177,9 @@ class StickReorderEnv(ManipulationEnv):
         on top, so goal_z floated ~2.5 cm above any reachable rest pose and
         every demo grazed the 3 cm success_threshold on z alone.
         """
+        if self.placement_mode == "two_stick_side":
+            return self._compute_side_goal_positions(sample=False)
+
         total_span = (self.num_sticks - 1) * self.goal_spacing
         table_top_z = self.table_offset[2]
         return np.array(
@@ -164,6 +193,22 @@ class StickReorderEnv(ManipulationEnv):
                 for i in range(self.num_sticks)
             ]
         )
+
+    def _compute_side_goal_positions(self, sample: bool) -> np.ndarray:
+        """Return side-specific N=2 goals.
+
+        In side mode the desired pose keeps each stick aligned with world X
+        (goal_yaw=0), so only the center Y coordinate is randomized.
+        """
+        table_top_z = self.table_offset[2]
+        goals = []
+        for y_range in self.side_goal_y_ranges:
+            if sample:
+                y = self.rng.uniform(y_range[0], y_range[1])
+            else:
+                y = 0.5 * (y_range[0] + y_range[1])
+            goals.append([self.side_goal_x, y, table_top_z + self.stick_radius])
+        return np.array(goals, dtype=float)
 
 
     # ── Robosuite lifecycle: Modeling API (XML generation) ─────────────
@@ -191,7 +236,7 @@ class StickReorderEnv(ManipulationEnv):
                 name=f"stick{i}",
                 length=self.stick_length,
                 radius=self.stick_radius,
-                color_idx=i,
+                color_idx=self.stick_color_indices[i],
             )
             for i in range(self.num_sticks)
         ]
@@ -280,12 +325,37 @@ class StickReorderEnv(ManipulationEnv):
         Writes 7D joint state (xyz + quaternion) directly into MuJoCo sim."""
         super()._reset_internal()
         if not self.deterministic_reset:
-            object_placements = self.placement_initializer.sample()
-            for obj_pos, obj_quat, obj in object_placements.values():
-                self.sim.data.set_joint_qpos(
-                    obj.joints[0],
-                    np.concatenate([np.array(obj_pos), np.array(obj_quat)]),
-                )
+            if self.placement_mode == "two_stick_side":
+                self._goal_positions = self._compute_side_goal_positions(sample=True)
+                self._place_side_sticks()
+            else:
+                object_placements = self.placement_initializer.sample()
+                for obj_pos, obj_quat, obj in object_placements.values():
+                    self.sim.data.set_joint_qpos(
+                        obj.joints[0],
+                        np.concatenate([np.array(obj_pos), np.array(obj_quat)]),
+                    )
+            self.sim.forward()
+
+    def _place_side_sticks(self):
+        """Place stick0 on negative Y and stick1 on positive Y.
+
+        The side ranges leave a dead zone around Y=0 so rotated initial sticks
+        cannot cross into the other stick's workspace.
+        """
+        z = self.table_offset[2] + self.stick_radius + 0.01
+        for i, obj in enumerate(self.stick_objects):
+            x = self.rng.uniform(self.side_init_x_range[0], self.side_init_x_range[1])
+            y = self.rng.uniform(self.side_init_y_ranges[i][0], self.side_init_y_ranges[i][1])
+            yaw = self.rng.uniform(self.side_init_yaw_range[0], self.side_init_yaw_range[1])
+            quat_wxyz = np.array([
+                np.cos(yaw / 2.0),
+                0.0,
+                0.0,
+                np.sin(yaw / 2.0),
+            ])
+            pos = np.array([x, y, z])
+            self.sim.data.set_joint_qpos(obj.joints[0], np.concatenate([pos, quat_wxyz]))
 
 
     # ── Reward and success ─────────────────────────────────────────────
