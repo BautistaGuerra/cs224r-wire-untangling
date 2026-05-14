@@ -179,15 +179,6 @@ class DPFMModelPolicy(ModelPolicy):
         if "obs_norm" in checkpoint:
             self.obs_norm = Normalizer.from_state_dict(checkpoint["obs_norm"])
             self.action_norm = Normalizer.from_state_dict(checkpoint["action_norm"])
-        # else:
-        #     self.obs_norm = Normalizer(
-        #         loc=checkpoint["obs_mean"], scale=checkpoint["obs_std"],
-        #     )
-        #     self.action_norm = Normalizer(
-        #         loc=checkpoint["action_mean"], scale=checkpoint["action_std"],
-        #         clip_low=checkpoint.get("action_low"),
-        #         clip_high=checkpoint.get("action_high"),
-        #     )
 
         self.model = FlowMatchingPolicy(
             state_dim=int(checkpoint["state_dim"]),
@@ -235,13 +226,15 @@ class DPFMModelPolicy(ModelPolicy):
 
 
 def run_policy(env, policy:ModelPolicy, n_episodes: int = 2, render: bool = False, fps: int = 20, record_path: str = None):
-    """Run a trained policy in the environment.
+    """Run a trained policy in the environment and report success rate.
     Uses GymWrapper to produce the flat obs vector the policy expects,
     while keeping the underlying Robosuite renderer active."""
     gym_env = GymWrapper(env)
     sleep_time = 1.0 / fps if render else 0.0
     writer = _make_writer(record_path, fps) if record_path else None
 
+    successes = 0
+    total_rewards = []
     for ep in range(n_episodes):
         obs, _ = gym_env.reset()
         policy.reset()
@@ -267,7 +260,15 @@ def run_policy(env, policy:ModelPolicy, n_episodes: int = 2, render: bool = Fals
             if writer:
                 writer.append_data(_grab_frame(env))
 
-        print(f"Episode {ep + 1}: steps={step}  total_reward={total_reward:.3f}  success={info.get('is_success', False)}")
+        success = info.get("is_success", False)
+        successes += int(success)
+        total_rewards.append(total_reward)
+        print(f"Episode {ep + 1}: steps={step}  total_reward={total_reward:.3f}  success={success}")
+
+    mean_reward = np.mean(total_rewards)
+    std_reward = np.std(total_rewards)
+    print(f"\nSuccess rate: {successes}/{n_episodes} ({successes/n_episodes:.0%})")
+    print(f"Reward: {mean_reward:.3f} ± {std_reward:.3f}")
 
     if writer:
         writer.close()

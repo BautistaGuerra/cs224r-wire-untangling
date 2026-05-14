@@ -124,7 +124,7 @@ class Normalizer:
         if self.clip_low is not None:
             under = self.clip_low - raw  # positive where raw < clip_low
             max_under = np.max(under, axis=0) if raw.ndim > 1 else under
-            bad = max_under > 0
+            bad = max_under > 0.1
             if np.any(bad):
                 dims = np.where(bad)[0]
                 for d in dims:
@@ -132,7 +132,7 @@ class Normalizer:
         if self.clip_high is not None:
             over = raw - self.clip_high  # positive where raw > clip_high
             max_over = np.max(over, axis=0) if raw.ndim > 1 else over
-            bad = max_over > 0
+            bad = max_over > 0.1
             if np.any(bad):
                 dims = np.where(bad)[0]
                 for d in dims:
