@@ -344,7 +344,7 @@ if __name__ == "__main__":
                         help="Path to .pth checkpoint for trained DPFM policy")
     parser.add_argument("--dpfm-execute-steps", type=int, default=None,
                         help="Override DPFM chunk actions executed before re-planning")
-    parser.add_argument("--dpfm-stochastic", action="store_true",
+    parser.add_argument("--dpfm-stochastic", action="store_true", default=True,
                         help="Use random Flow Matching initial noise instead of deterministic zero-noise sampling")
     parser.add_argument("--expert", action="store_true", help="Run scripted pick-and-place expert (single stick)")
     parser.add_argument("--num-sticks", type=int, default=None, help="Override number of sticks")
