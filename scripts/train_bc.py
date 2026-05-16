@@ -14,6 +14,7 @@ inference applies the same transform. ~3 minutes on MPS for 100 epochs.
 """
 
 import argparse
+import json
 import os
 import random
 
@@ -25,6 +26,11 @@ import yaml
 from torch.utils.data import DataLoader, TensorDataset
 
 from wire_untangling.policies.mlp_bc import MLPBCPolicy, mse_loss
+
+
+CONDITIONING_OBS = "obs"
+CONDITIONING_PHASE_ACTIVE = "phase-active"
+NUM_PHASES = 8
 
 
 def read_demo_metadata(demo_path: str) -> dict:
@@ -67,44 +73,123 @@ def validate_demo_metadata(meta: dict, require_hash: str | None,
         )
 
 
+def _decode_json_attr(value):
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        value = value.decode()
+    return json.loads(value)
+
+
+def _infer_num_sticks(f: h5py.File) -> int:
+    env_cfg = _decode_json_attr(f.attrs.get("env_config"))
+    if env_cfg and "num_sticks" in env_cfg:
+        return int(env_cfg["num_sticks"])
+
+    max_stick = -1
+    for key in f["data"].keys():
+        demo = f["data"][key]
+        if "active_stick" in demo:
+            active = demo["active_stick"][:]
+            if len(active):
+                max_stick = max(max_stick, int(active.max()))
+    return max_stick + 1 if max_stick >= 0 else 1
+
+
+def make_phase_active_features(
+    phases: np.ndarray,
+    active_sticks: np.ndarray,
+    num_sticks: int,
+    num_phases: int = NUM_PHASES,
+) -> np.ndarray:
+    """One-hot encode per-step high-level labels for phase-conditioned BC."""
+    phases = np.asarray(phases, dtype=np.int64)
+    active_sticks = np.asarray(active_sticks, dtype=np.int64)
+    if phases.shape != active_sticks.shape:
+        raise ValueError(
+            f"phase and active_stick shapes differ: {phases.shape} vs {active_sticks.shape}"
+        )
+    if np.any((phases < 0) | (phases >= num_phases)):
+        raise ValueError(f"phase values must be in [0, {num_phases})")
+    if np.any((active_sticks < 0) | (active_sticks >= num_sticks)):
+        raise ValueError(f"active_stick values must be in [0, {num_sticks})")
+
+    out = np.zeros((len(phases), num_phases + num_sticks), dtype=np.float32)
+    out[np.arange(len(phases)), phases] = 1.0
+    out[np.arange(len(active_sticks)), num_phases + active_sticks] = 1.0
+    return out
+
+
 def load_data(
     demo_path: str,
     batch_size: int = 256,
     shuffle: bool = True,
-) -> tuple[DataLoader, int, int, np.ndarray, np.ndarray]:
+    conditioning: str = CONDITIONING_OBS,
+) -> tuple[DataLoader, int, int, np.ndarray, np.ndarray, dict]:
     """Load (state, action) pairs from HDF5, normalise states.
 
     No action chunking — MLP-BC predicts one action per state, so each demo
     timestep is an independent training example.
 
-    Returns (dataloader, state_dim, action_dim, state_mean, state_std).
+    Returns (dataloader, state_dim, action_dim, state_mean, state_std, meta).
     """
     all_obs = []
     all_actions = []
+    all_features = []
+
     with h5py.File(demo_path, "r") as f:
+        num_sticks = _infer_num_sticks(f)
         for key in sorted(f["data"].keys()):
             demo = f["data"][key]
             all_obs.append(demo["obs"][:])
             all_actions.append(demo["actions"][:])
+            if conditioning == CONDITIONING_PHASE_ACTIVE:
+                if "phase" not in demo or "active_stick" not in demo:
+                    raise ValueError(
+                        "--conditioning phase-active requires phase and active_stick "
+                        f"datasets; missing in data/{key}"
+                    )
+                all_features.append(
+                    make_phase_active_features(
+                        demo["phase"][:],
+                        demo["active_stick"][:],
+                        num_sticks=num_sticks,
+                    )
+                )
 
     flat_obs = np.concatenate(all_obs, axis=0)
     flat_actions = np.concatenate(all_actions, axis=0)
-    state_dim = flat_obs.shape[1]
+    raw_obs_dim = flat_obs.shape[1]
     action_dim = flat_actions.shape[1]
+    state = flat_obs
+    if conditioning == CONDITIONING_PHASE_ACTIVE:
+        state = np.concatenate([flat_obs, np.concatenate(all_features, axis=0)], axis=1)
+    elif conditioning != CONDITIONING_OBS:
+        raise ValueError(
+            f"Unsupported conditioning={conditioning!r}; "
+            f"expected {CONDITIONING_OBS!r} or {CONDITIONING_PHASE_ACTIVE!r}"
+        )
+    state_dim = state.shape[1]
 
     # Per-dim z-score stats. eps avoids /0 on dims that happen to be
     # constant in the demos (e.g. goal_pos at N=1 is fixed every episode).
-    state_mean = flat_obs.mean(axis=0).astype(np.float32)
-    state_std = flat_obs.std(axis=0).astype(np.float32)
+    state_mean = state.mean(axis=0).astype(np.float32)
+    state_std = state.std(axis=0).astype(np.float32)
     state_std = np.maximum(state_std, 1e-6)
-    flat_obs_normed = ((flat_obs - state_mean) / state_std).astype(np.float32)
+    state_normed = ((state - state_mean) / state_std).astype(np.float32)
 
-    s = torch.tensor(flat_obs_normed, dtype=torch.float32)
+    s = torch.tensor(state_normed, dtype=torch.float32)
     a = torch.tensor(flat_actions, dtype=torch.float32)
     loader = DataLoader(
         TensorDataset(s, a), batch_size=batch_size, shuffle=shuffle,
     )
-    return loader, state_dim, action_dim, state_mean, state_std
+    meta = {
+        "conditioning": conditioning,
+        "raw_obs_dim": raw_obs_dim,
+        "num_phases": NUM_PHASES,
+        "num_sticks": num_sticks,
+    }
+    return loader, state_dim, action_dim, state_mean, state_std, meta
 
 
 def train(
@@ -117,6 +202,7 @@ def train(
     seed: int,
     use_wandb: bool,
     checkpoint_dir: str,
+    conditioning: str = CONDITIONING_OBS,
 ):
     random.seed(seed)
     np.random.seed(seed)
@@ -130,8 +216,10 @@ def train(
         device = torch.device("cpu")
     print(f"Training device: {device}")
 
-    loader, state_dim, action_dim, state_mean, state_std = load_data(
-        demos_path, batch_size=batch_size,
+    loader, state_dim, action_dim, state_mean, state_std, conditioning_meta = load_data(
+        demos_path,
+        batch_size=batch_size,
+        conditioning=conditioning,
     )
 
     os.makedirs(checkpoint_dir, exist_ok=True)
@@ -143,7 +231,9 @@ def train(
                 "policy": "mlp_bc",
                 "seed": seed,
                 "state_dim": state_dim,
+                "raw_obs_dim": conditioning_meta["raw_obs_dim"],
                 "action_dim": action_dim,
+                "conditioning": conditioning,
                 "hidden_dims": list(hidden_dims),
                 "dropout": dropout,
                 "epochs": epochs,
@@ -184,7 +274,11 @@ def train(
     torch.save({
         "model_state_dict": policy.state_dict(),
         "state_dim": state_dim,
+        "raw_obs_dim": conditioning_meta["raw_obs_dim"],
         "action_dim": action_dim,
+        "conditioning": conditioning,
+        "num_phases": conditioning_meta["num_phases"],
+        "num_sticks": conditioning_meta["num_sticks"],
         "hidden_dims": list(hidden_dims),
         "dropout": dropout,
         # Stored as torch tensors so torch.load(weights_only=True) accepts
@@ -215,6 +309,10 @@ def main():
     parser.add_argument("--dropout", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no-wandb", action="store_true")
+    parser.add_argument("--conditioning", choices=[CONDITIONING_OBS, CONDITIONING_PHASE_ACTIVE],
+                        default=CONDITIONING_OBS,
+                        help="Input features for BC. 'obs' uses only env observations; "
+                             "'phase-active' appends one-hot phase and active_stick labels.")
     parser.add_argument("--require-config-hash", default=None,
                         help="Hard-fail if the demo HDF5's env_config_hash "
                              "doesn't match. Use to enforce a canonical dataset.")
@@ -236,6 +334,7 @@ def main():
         seed=args.seed,
         use_wandb=not args.no_wandb,
         checkpoint_dir=args.checkpoint_dir,
+        conditioning=args.conditioning,
     )
 
 

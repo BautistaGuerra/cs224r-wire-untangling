@@ -20,7 +20,7 @@ import torch
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(_REPO_ROOT, "scripts"))
 
-from train_bc import train  # noqa: E402
+from train_bc import CONDITIONING_PHASE_ACTIVE, load_data, train  # noqa: E402
 
 from wire_untangling.policies.mlp_bc import MLPBCPolicy, mse_loss
 
@@ -78,10 +78,13 @@ def synthetic_demos(tmp_path):
             grp.create_dataset("dones", data=np.zeros(T, dtype=bool))
             grp.create_dataset("next_obs",
                                data=rng.standard_normal((T, state_dim)).astype(np.float32))
-            grp.create_dataset("phase", data=np.zeros(T, dtype=np.int8))
+            grp.create_dataset("phase", data=rng.integers(0, 8, size=T, dtype=np.int8))
+            grp.create_dataset("active_stick",
+                               data=np.array([0] * (T // 2) + [1] * (T - T // 2), dtype=np.int8))
             grp.create_dataset("is_success", data=np.zeros(T, dtype=bool))
         f.attrs["num_demos"] = 2
         f.attrs["obs_dim"] = state_dim
+        f.attrs["env_config"] = '{"num_sticks": 2}'
         f.attrs["env_config_hash"] = "synth0000"
         f.attrs["top_seed"] = 42
         f.attrs["oracle_version"] = "test"
@@ -126,3 +129,49 @@ def test_train_bc_end_to_end(synthetic_demos, tmp_path):
     )
     policy.load_state_dict(ckpt["model_state_dict"])
     policy.eval()
+
+
+def test_load_data_phase_active_appends_one_hot_features(synthetic_demos):
+    loader, state_dim, action_dim, state_mean, state_std, meta = load_data(
+        synthetic_demos,
+        batch_size=16,
+        shuffle=False,
+        conditioning=CONDITIONING_PHASE_ACTIVE,
+    )
+
+    assert state_dim == 8 + 8 + 2
+    assert action_dim == 7
+    assert meta["raw_obs_dim"] == 8
+    assert meta["num_phases"] == 8
+    assert meta["num_sticks"] == 2
+    assert state_mean.shape == (18,)
+    assert state_std.shape == (18,)
+
+    states, actions = next(iter(loader))
+    assert states.shape[1] == 18
+    assert actions.shape[1] == 7
+
+
+def test_train_bc_phase_active_checkpoint_metadata(synthetic_demos, tmp_path):
+    ckpt_dir = tmp_path / "phase_ckpt"
+    train(
+        demos_path=synthetic_demos,
+        epochs=2,
+        batch_size=32,
+        lr=1e-3,
+        hidden_dims=(32, 32),
+        dropout=0.0,
+        seed=0,
+        use_wandb=False,
+        checkpoint_dir=str(ckpt_dir),
+        conditioning=CONDITIONING_PHASE_ACTIVE,
+    )
+
+    ckpt = torch.load(str(ckpt_dir / "mlp_bc_policy.pt"), map_location="cpu", weights_only=True)
+    assert ckpt["conditioning"] == CONDITIONING_PHASE_ACTIVE
+    assert int(ckpt["raw_obs_dim"]) == 8
+    assert int(ckpt["state_dim"]) == 18
+    assert int(ckpt["num_phases"]) == 8
+    assert int(ckpt["num_sticks"]) == 2
+    assert ckpt["state_mean"].shape == (18,)
+    assert ckpt["state_std"].shape == (18,)
