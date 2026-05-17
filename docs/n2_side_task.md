@@ -97,6 +97,49 @@ Collect demos:
   --seed 42
 ```
 
+Train the obs-only MLP-BC baseline:
+
+```bash
+.venv/bin/python scripts/train_bc.py \
+  --demos-path data/stick_n2_side_goals_demos.hdf5 \
+  --checkpoint-dir checkpoints/mlp_bc_n2_obs \
+  --conditioning obs \
+  --seed 42 \
+  --no-wandb
+```
+
+Train the phase/active-stick conditioned MLP-BC baseline:
+
+```bash
+.venv/bin/python scripts/train_bc.py \
+  --demos-path data/stick_n2_side_goals_demos.hdf5 \
+  --checkpoint-dir checkpoints/mlp_bc_n2_phase_active \
+  --conditioning phase-active \
+  --seed 42 \
+  --no-wandb
+```
+
+The `phase-active` checkpoint appends one-hot `phase` and `active_stick`
+features during training. During playback, `play_env.py` recreates those
+features with an online expert-style phase tracker, but the MLP still outputs
+the robot action.
+
+Evaluate either checkpoint on the same N=2 environment config:
+
+```bash
+.venv/bin/python scripts/play_env.py \
+  --config configs/stick_reorder_n2.yaml \
+  --bc_checkpoint checkpoints/mlp_bc_n2_obs/mlp_bc_policy.pt \
+  --episodes 100
+```
+
+```bash
+.venv/bin/python scripts/play_env.py \
+  --config configs/stick_reorder_n2.yaml \
+  --bc_checkpoint checkpoints/mlp_bc_n2_phase_active/mlp_bc_policy.pt \
+  --episodes 100
+```
+
 Render a few demos before a large collection:
 
 ```bash

@@ -32,6 +32,7 @@ import time
 import imageio
 import numpy as np
 import torch
+import yaml
 from robosuite.wrappers import GymWrapper
 from stable_baselines3 import SAC
 
@@ -51,20 +52,72 @@ def _grab_frame(env):
     return env.sim.render(width=1280, height=720, camera_name="agentview")[::-1]
 
 
-def make_env(render: bool = False, record: bool = False, num_sticks: int = 3):
-    return StickReorderEnv(
-        robots="Panda",
-        num_sticks=num_sticks,
-        reward_shaping=True,
+def load_config(path: str) -> dict:
+    with open(path) as f:
+        return yaml.safe_load(f)
+
+
+def make_env(
+    render: bool = False,
+    record: bool = False,
+    num_sticks: int | None = None,
+    env_cfg: dict | None = None,
+):
+    env_cfg = dict(env_cfg or {})
+    if num_sticks is not None:
+        env_cfg["num_sticks"] = num_sticks
+
+    kwargs = dict(
+        robots=env_cfg.get("robot", "Panda"),
+        num_sticks=env_cfg.get("num_sticks", 3),
+        stick_length=env_cfg.get("stick_length", 0.20),
+        stick_radius=env_cfg.get("stick_radius", 0.0075),
+        goal_spacing=env_cfg.get("goal_spacing", 0.06),
+        success_threshold=env_cfg.get("success_threshold", 0.03),
+        orientation_threshold=env_cfg.get("orientation_threshold", np.deg2rad(10.0)),
+        lambda_rot=env_cfg.get("lambda_rot", 0.1),
+        goal_yaw=env_cfg.get("goal_yaw", 0.0),
+        reward_shaping=env_cfg.get("reward_shaping", True),
+        terminate_on_success=env_cfg.get("terminate_on_success", True),
         has_renderer=render,
         has_offscreen_renderer=record,
         use_camera_obs=False,
         control_freq=20,
-        horizon=500,
+        horizon=env_cfg.get("horizon", 500),
         camera_names="agentview",
         camera_heights=720,
         camera_widths=1280,
     )
+    optional_env_keys = (
+        "placement_mode",
+        "init_x_range",
+        "init_y_range",
+        "side_init_x_range",
+        "side_init_y_ranges",
+        "side_init_yaw_range",
+        "side_goal_x",
+        "side_goal_y_ranges",
+        "stick_color_indices",
+    )
+    for key in optional_env_keys:
+        if key in env_cfg:
+            kwargs[key] = env_cfg[key]
+
+    return StickReorderEnv(
+        **kwargs,
+    )
+
+
+def make_phase_active_features(
+    phase: int,
+    active_stick: int,
+    num_phases: int,
+    num_sticks: int,
+) -> np.ndarray:
+    features = np.zeros(num_phases + num_sticks, dtype=np.float32)
+    features[int(phase)] = 1.0
+    features[num_phases + int(active_stick)] = 1.0
+    return features
 
 
 def run_random(env, n_episodes: int = 2, render: bool = False, fps: int = 20, record_path: str = None):
@@ -137,6 +190,12 @@ class MLPBCModelPolicy(ModelPolicy):
 
         ckpt = torch.load(model_path, map_location=self.device, weights_only=True)
         self.action_dim = int(ckpt["action_dim"])
+        self.conditioning = ckpt.get("conditioning", "obs")
+        self.raw_obs_dim = int(ckpt.get("raw_obs_dim", ckpt["state_dim"]))
+        self.num_phases = int(ckpt.get("num_phases", 8))
+        self.num_sticks = int(ckpt.get("num_sticks", 1))
+        self.goal_yaw = float(getattr(gym_env, "goal_yaw", 0.0))
+        self._phase_tracker = None
         self.model = MLPBCPolicy(
             state_dim=int(ckpt["state_dim"]),
             action_dim=self.action_dim,
@@ -148,16 +207,52 @@ class MLPBCModelPolicy(ModelPolicy):
 
         self.obs_norm = Normalizer(loc=ckpt["state_mean"], scale=ckpt["state_std"])
 
+    def set_gym_env(self, gym_env):
+        if self.conditioning != "phase-active":
+            return
+        obs_map = build_obs_index_map(gym_env)
+        self._phase_tracker = PickPlaceExpertPolicy(
+            obs_map,
+            goal_yaw=self.goal_yaw,
+        )
+
+    def _build_state(self, obs: np.ndarray) -> np.ndarray:
+        obs = np.asarray(obs, dtype=np.float32)
+        if self.conditioning == "obs":
+            return obs
+        if self.conditioning != "phase-active":
+            raise ValueError(f"Unsupported MLP-BC conditioning: {self.conditioning!r}")
+        if self._phase_tracker is None:
+            raise RuntimeError(
+                "phase-active MLP-BC requires a GymWrapper-backed phase tracker; "
+                "run it via run_policy/play_env so set_gym_env() is called."
+            )
+
+        phase = int(self._phase_tracker.phase)
+        active_stick = int(self._phase_tracker.active_stick)
+        # Advance the tracker using current obs, but discard its scripted action.
+        # The MLP still controls the robot.
+        self._phase_tracker.predict(obs)
+        features = make_phase_active_features(
+            phase,
+            active_stick,
+            num_phases=self.num_phases,
+            num_sticks=self.num_sticks,
+        )
+        return np.concatenate([obs, features], axis=0)
+
     def predict(self, obs: np.ndarray) -> np.ndarray:
         with torch.no_grad():
+            state_np = self._build_state(obs)
             normed = self.obs_norm.normalize_torch(
-                torch.tensor(obs, dtype=torch.float32, device=self.device),
+                torch.tensor(state_np, dtype=torch.float32, device=self.device),
             ).unsqueeze(0)
             action = self.model(normed)[0]
         return action.cpu().numpy()
 
     def reset(self):
-        pass
+        if self._phase_tracker is not None:
+            self._phase_tracker.reset()
 
 
 class DPFMModelPolicy(ModelPolicy):
@@ -230,6 +325,8 @@ def run_policy(env, policy:ModelPolicy, n_episodes: int = 2, render: bool = Fals
     Uses GymWrapper to produce the flat obs vector the policy expects,
     while keeping the underlying Robosuite renderer active."""
     gym_env = GymWrapper(env)
+    if hasattr(policy, "set_gym_env"):
+        policy.set_gym_env(gym_env)
     sleep_time = 1.0 / fps if render else 0.0
     writer = _make_writer(record_path, fps) if record_path else None
 
@@ -276,12 +373,24 @@ def run_policy(env, policy:ModelPolicy, n_episodes: int = 2, render: bool = Fals
     gym_env.close()
 
 
-def run_expert(env, n_episodes: int = 2, render: bool = False, fps: int = 20, record_path: str = None):
+def run_expert(
+    env,
+    n_episodes: int = 2,
+    render: bool = False,
+    fps: int = 20,
+    record_path: str = None,
+    expert_cfg: dict | None = None,
+):
     """Run the scripted pick-and-place expert policy.
     Uses GymWrapper for flat observations + underlying Robosuite renderer."""
     gym_env = GymWrapper(env)
     obs_map = build_obs_index_map(gym_env)
-    expert = PickPlaceExpertPolicy(obs_map)
+    expert_cfg = dict(expert_cfg or {})
+    expert = PickPlaceExpertPolicy(
+        obs_map,
+        goal_yaw=getattr(env, "goal_yaw", 0.0),
+        stick_order=expert_cfg.get("stick_order"),
+    )
     sleep_time = 1.0 / fps if render else 0.0
     writer = _make_writer(record_path, fps) if record_path else None
 
@@ -337,6 +446,8 @@ if __name__ == "__main__":
     parser.add_argument("--fps", type=int, default=20, help="Target render FPS (default 20)")
     parser.add_argument("--gym", action="store_true", help="Print Gymnasium spaces")
     parser.add_argument("--episodes", type=int, default=2)
+    parser.add_argument("--config", default=None,
+                        help="Optional YAML config for env/expert settings, e.g. configs/stick_reorder_n2.yaml")
     parser.add_argument("--bc_checkpoint", type=str, default=None,
                         help="Path to .pt checkpoint for trained MLP-BC policy")
     parser.add_argument("--sac_checkpoint", type=str, default=None, help="Path to SB3 .zip checkpoint for trained policy")
@@ -350,14 +461,35 @@ if __name__ == "__main__":
     parser.add_argument("--num-sticks", type=int, default=None, help="Override number of sticks")
     args = parser.parse_args()
 
-    # Expert and DPFM modes currently target the one-stick BC setup.
-    num_sticks = args.num_sticks if args.num_sticks is not None else (1 if (args.expert or args.dpfm_checkpoint or args.bc_checkpoint) else 3)
-    env = make_env(render=args.render, record=bool(args.record), num_sticks=num_sticks)
+    cfg = load_config(args.config) if args.config else {}
+    env_cfg = cfg.get("env", {})
+    expert_cfg = cfg.get("expert", {})
+
+    if args.num_sticks is not None:
+        num_sticks = args.num_sticks
+    elif args.config:
+        num_sticks = None
+    else:
+        # Preserve the old one-stick default for BC / expert checkpoint smoke tests.
+        num_sticks = 1 if (args.expert or args.dpfm_checkpoint or args.bc_checkpoint) else 3
+    env = make_env(
+        render=args.render,
+        record=bool(args.record),
+        num_sticks=num_sticks,
+        env_cfg=env_cfg,
+    )
 
     if args.gym:
         print_gym_spaces(env)
     elif args.expert:
-        run_expert(env, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record)
+        run_expert(
+            env,
+            n_episodes=args.episodes,
+            render=args.render,
+            fps=args.fps,
+            record_path=args.record,
+            expert_cfg=expert_cfg,
+        )
     elif args.bc_checkpoint:
         policy = MLPBCModelPolicy(args.bc_checkpoint, env)
         run_policy(env, policy, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record)

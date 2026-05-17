@@ -52,6 +52,7 @@ class Normalizer:
         scale: np.ndarray | torch.Tensor,
         clip_low: np.ndarray | torch.Tensor | None = None,
         clip_high: np.ndarray | torch.Tensor | None = None,
+        warn_on_clip: bool = False,
     ):
         """Construct a Normalizer from pre-computed statistics.
 
@@ -63,11 +64,14 @@ class Normalizer:
                        denormalization.  Typically the env's action_low.
             clip_high: Optional per-dimension upper bound applied after
                        denormalization.  Typically the env's action_high.
+            warn_on_clip: If True, log a warning when denormalized values
+                       exceed clip bounds.
         """
         self.loc = np.asarray(loc, dtype=np.float32)
         self.scale = np.maximum(np.asarray(scale, dtype=np.float32), self.EPS)
         self.clip_low = np.asarray(clip_low, dtype=np.float32) if clip_low is not None else None
         self.clip_high = np.asarray(clip_high, dtype=np.float32) if clip_high is not None else None
+        self.warn_on_clip = warn_on_clip
 
     # ── numpy paths ──────────────────────────────────────────────────────
 
@@ -83,7 +87,8 @@ class Normalizer:
         """
         raw = x * self.scale + self.loc
         if self.clip_low is not None or self.clip_high is not None:
-            # self._warn_clip_violation(raw)
+            if self.warn_on_clip:
+                self._warn_clip_violation(raw)
             raw = np.clip(raw, self.clip_low, self.clip_high)
         return raw
 
@@ -105,7 +110,8 @@ class Normalizer:
         scale = torch.as_tensor(self.scale, dtype=torch.float32, device=device or x.device)
         raw = x * scale + loc
         if self.clip_low is not None or self.clip_high is not None:
-            # self._warn_clip_violation(raw.detach().cpu().numpy())
+            if self.warn_on_clip:
+                self._warn_clip_violation(raw.detach().cpu().numpy())
             low = torch.as_tensor(self.clip_low, device=x.device) if self.clip_low is not None else None
             high = torch.as_tensor(self.clip_high, device=x.device) if self.clip_high is not None else None
             raw = torch.clamp(raw, min=low, max=high)

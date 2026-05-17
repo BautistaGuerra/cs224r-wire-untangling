@@ -167,6 +167,30 @@ output. ~5 min on Apple Silicon MPS for the canonical 1000-demo dataset.
 On a 200-demo dataset the same recipe gives ~87% N=1 success rate; on
 1000 demos, ~92%.
 
+For the first N=2 side-specific task, train both BC baselines from the same
+demo file:
+
+```bash
+python scripts/train_bc.py --demos-path data/stick_n2_side_goals_demos.hdf5 \
+    --checkpoint-dir checkpoints/mlp_bc_n2_obs --conditioning obs --no-wandb
+
+python scripts/train_bc.py --demos-path data/stick_n2_side_goals_demos.hdf5 \
+    --checkpoint-dir checkpoints/mlp_bc_n2_phase_active \
+    --conditioning phase-active --no-wandb
+```
+
+Evaluate with the N=2 config so randomized side goals and placement ranges
+match the demo collection setup:
+
+```bash
+python scripts/play_env.py --config configs/stick_reorder_n2.yaml \
+    --bc_checkpoint checkpoints/mlp_bc_n2_obs/mlp_bc_policy.pt --episodes 100
+
+python scripts/play_env.py --config configs/stick_reorder_n2.yaml \
+    --bc_checkpoint checkpoints/mlp_bc_n2_phase_active/mlp_bc_policy.pt \
+    --episodes 100
+```
+
 ## Recording Videos
 
 Save MP4 videos of any policy for presentations or debugging. Uses offscreen

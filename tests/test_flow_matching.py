@@ -4,11 +4,8 @@ import h5py
 import numpy as np
 import torch
 
-from scripts.train_flow_matching import (
-    denormalize_array,
-    load_data,
-    normalize_array,
-)
+from scripts.train_flow_matching import load_data
+from wire_untangling.utils.normalizer import Normalizer
 from scripts.play_env import DPFMModelPolicy
 from wire_untangling.policies.flow_matching_policy import FlowMatchingSchedule
 
@@ -24,8 +21,9 @@ def test_dataset_standardization_roundtrip():
         dtype=np.float32,
     )
 
-    normalized = normalize_array(raw, mean, std)
-    np.testing.assert_allclose(denormalize_array(normalized, mean, std), raw)
+    norm = Normalizer(loc=mean, scale=std)
+    normalized = norm.normalize(raw)
+    np.testing.assert_allclose(norm.denormalize(normalized), raw)
 
 
 def test_flow_matching_sample_is_unclamped_by_default():
@@ -74,12 +72,11 @@ def test_load_data_normalizes_action_chunks(tmp_path):
         grp.create_dataset("obs", data=obs)
         grp.create_dataset("actions", data=actions)
 
-    loader, state_dim, action_dim, stats = load_data(
+    loader, state_dim, action_dim, obs_norm, action_norm = load_data(
         str(path),
         chunk_size=3,
         batch_size=8,
         shuffle=False,
-        normalize=True,
     )
     states, chunks = next(iter(loader))
 
@@ -87,7 +84,8 @@ def test_load_data_normalizes_action_chunks(tmp_path):
     assert action_dim == 2
     assert states.shape[1] == 2
     assert chunks.shape[1] == 6
-    assert set(stats) == {"obs_mean", "obs_std", "action_mean", "action_std"}
+    assert isinstance(obs_norm, Normalizer)
+    assert isinstance(action_norm, Normalizer)
     assert abs(float(states.mean())) < 2.0
     assert abs(float(chunks.mean())) < 2.0
 

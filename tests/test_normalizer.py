@@ -150,12 +150,13 @@ class TestClipViolationWarning:
 
     @pytest.fixture()
     def norm(self):
-        """Identity normalizer (loc=0, scale=1) with clips at [-1, 1]."""
+        """Identity normalizer (loc=0, scale=1) with clips at [-1, 1] and warnings enabled."""
         return Normalizer(
             loc=np.array([0, 0], dtype=np.float32),
             scale=np.array([1, 1], dtype=np.float32),
             clip_low=np.array([-1, -1], dtype=np.float32),
             clip_high=np.array([1, 1], dtype=np.float32),
+            warn_on_clip=True,
         )
 
     def test_warns_on_overshoot_above(self, norm, caplog):
