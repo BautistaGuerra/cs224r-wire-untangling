@@ -40,6 +40,7 @@ from wire_untangling.envs import StickReorderEnv
 from wire_untangling.policies import PickPlaceExpertPolicy, build_obs_index_map
 from wire_untangling.policies.mlp_bc import MLPBCPolicy
 from wire_untangling.policies.flow_matching_policy import FlowMatchingPolicy
+from wire_untangling.utils.normalizer import Normalizer
 
 
 def _make_writer(path: str, fps: int):
@@ -204,12 +205,7 @@ class MLPBCModelPolicy(ModelPolicy):
         self.model.load_state_dict(ckpt["model_state_dict"])
         self.model.eval()
 
-        mean = ckpt["state_mean"]
-        std = ckpt["state_std"]
-        mean = mean.detach().clone() if isinstance(mean, torch.Tensor) else torch.tensor(mean)
-        std = std.detach().clone() if isinstance(std, torch.Tensor) else torch.tensor(std)
-        self.state_mean = mean.to(dtype=torch.float32, device=self.device)
-        self.state_std = std.to(dtype=torch.float32, device=self.device)
+        self.obs_norm = Normalizer(loc=ckpt["state_mean"], scale=ckpt["state_std"])
 
     def set_gym_env(self, gym_env):
         if self.conditioning != "phase-active":
@@ -248,14 +244,10 @@ class MLPBCModelPolicy(ModelPolicy):
     def predict(self, obs: np.ndarray) -> np.ndarray:
         with torch.no_grad():
             state_np = self._build_state(obs)
-            raw = torch.tensor(state_np, dtype=torch.float32, device=self.device)
-            if raw.numel() != self.state_mean.numel():
-                raise ValueError(
-                    f"Checkpoint expects state_dim={self.state_mean.numel()}, "
-                    f"got {raw.numel()} features. Check --config and conditioning."
-                )
-            state = ((raw - self.state_mean) / self.state_std).unsqueeze(0)
-            action = self.model(state)[0]
+            normed = self.obs_norm.normalize_torch(
+                torch.tensor(state_np, dtype=torch.float32, device=self.device),
+            ).unsqueeze(0)
+            action = self.model(normed)[0]
         return action.cpu().numpy()
 
     def reset(self):
@@ -278,18 +270,10 @@ class DPFMModelPolicy(ModelPolicy):
         )
         self.execute_steps = max(1, min(self.execute_steps, self.pred_horizon))
         self.stochastic = stochastic
-        self.action_low = np.asarray(checkpoint["action_low"], dtype=np.float32)
-        self.action_high = np.asarray(checkpoint["action_high"], dtype=np.float32)
-        self.obs_mean = np.asarray(checkpoint["obs_mean"], dtype=np.float32)
-        self.obs_std = np.asarray(checkpoint["obs_std"], dtype=np.float32)
-        self.action_mean = np.asarray(checkpoint["action_mean"], dtype=np.float32)
-        self.action_std = np.asarray(checkpoint["action_std"], dtype=np.float32)
-        normalization = checkpoint.get("normalization", None)
-        if normalization != "dataset_standard":
-            raise ValueError(
-                f"Unsupported DPFM normalization {normalization!r}; "
-                "expected 'dataset_standard'"
-            )
+
+        if "obs_norm" in checkpoint:
+            self.obs_norm = Normalizer.from_state_dict(checkpoint["obs_norm"])
+            self.action_norm = Normalizer.from_state_dict(checkpoint["action_norm"])
 
         self.model = FlowMatchingPolicy(
             state_dim=int(checkpoint["state_dim"]),
@@ -307,12 +291,8 @@ class DPFMModelPolicy(ModelPolicy):
         self._chunk = None
         self._chunk_idx = 0
 
-    def _denormalize_chunk(self, action_chunk: np.ndarray) -> np.ndarray:
-        raw = action_chunk * np.maximum(self.action_std, 1e-6) + self.action_mean
-        return np.clip(raw, self.action_low, self.action_high)
-
     def _sample_chunk(self, obs: np.ndarray) -> np.ndarray:
-        obs = (obs - self.obs_mean) / np.maximum(self.obs_std, 1e-6)
+        obs = self.obs_norm.normalize(obs)
         with torch.no_grad():
             state = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
             initial_noise = None
@@ -329,7 +309,7 @@ class DPFMModelPolicy(ModelPolicy):
                 initial_noise=initial_noise,
             )
         chunk = flat_chunk[0].reshape(self.pred_horizon, self.action_dim).cpu().numpy()
-        return self._denormalize_chunk(chunk)
+        return self.action_norm.denormalize(chunk)
 
     def predict(self, obs: np.ndarray) -> np.ndarray:
         if self._chunk is None or self._chunk_idx >= min(self.execute_steps, self.pred_horizon):
@@ -341,7 +321,7 @@ class DPFMModelPolicy(ModelPolicy):
 
 
 def run_policy(env, policy:ModelPolicy, n_episodes: int = 2, render: bool = False, fps: int = 20, record_path: str = None):
-    """Run a trained policy in the environment.
+    """Run a trained policy in the environment and report success rate.
     Uses GymWrapper to produce the flat obs vector the policy expects,
     while keeping the underlying Robosuite renderer active."""
     gym_env = GymWrapper(env)
@@ -351,6 +331,7 @@ def run_policy(env, policy:ModelPolicy, n_episodes: int = 2, render: bool = Fals
     writer = _make_writer(record_path, fps) if record_path else None
 
     successes = 0
+    total_rewards = []
     for ep in range(n_episodes):
         obs, _ = gym_env.reset()
         policy.reset()
@@ -376,11 +357,15 @@ def run_policy(env, policy:ModelPolicy, n_episodes: int = 2, render: bool = Fals
             if writer:
                 writer.append_data(_grab_frame(env))
 
-        success = bool(info.get("is_success", False))
+        success = info.get("is_success", False)
         successes += int(success)
+        total_rewards.append(total_reward)
         print(f"Episode {ep + 1}: steps={step}  total_reward={total_reward:.3f}  success={success}")
 
+    mean_reward = np.mean(total_rewards)
+    std_reward = np.std(total_rewards)
     print(f"\nSuccess rate: {successes}/{n_episodes} ({successes/n_episodes:.0%})")
+    print(f"Reward: {mean_reward:.3f} ± {std_reward:.3f}")
 
     if writer:
         writer.close()
@@ -470,7 +455,7 @@ if __name__ == "__main__":
                         help="Path to .pth checkpoint for trained DPFM policy")
     parser.add_argument("--dpfm-execute-steps", type=int, default=None,
                         help="Override DPFM chunk actions executed before re-planning")
-    parser.add_argument("--dpfm-stochastic", action="store_true",
+    parser.add_argument("--dpfm-stochastic", action="store_true", default=True,
                         help="Use random Flow Matching initial noise instead of deterministic zero-noise sampling")
     parser.add_argument("--expert", action="store_true", help="Run scripted pick-and-place expert (single stick)")
     parser.add_argument("--num-sticks", type=int, default=None, help="Override number of sticks")
