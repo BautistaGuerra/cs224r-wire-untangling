@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 import numpy as np
 import torch
+from torch import distributions as pyd
 
 logger = logging.getLogger(__name__)
 
@@ -186,3 +187,55 @@ class Normalizer:
             clip_low=clip_low,
             clip_high=clip_high,
         )
+
+
+# These are the methods that normalize and clip actions sampled from RL policy
+# TODO: The code is taken from the residual-offpolicy-rl Amazon codebase. Understand it well. It may explain behavior of PDFM
+from torch.distributions.utils import _standard_normal
+def clip_action_norm(action, max_norm):
+    assert max_norm > 0
+    assert action.dim() == 2 and action.size(1) == 7
+
+    ee_action = action[:, :6]
+    gripper_action = action[:, 6:]
+
+    ee_action_norm = ee_action.norm(dim=1).unsqueeze(1)
+    ee_action = ee_action / ee_action_norm
+    assert (ee_action.norm(dim=1).min() - 1).abs() <= 1e-5
+    scale = ee_action_norm.clamp(max=max_norm)
+    ee_action = ee_action * scale
+    action = torch.cat([ee_action, gripper_action], dim=1)
+    return action  # noqa: RET504
+
+
+class TruncatedNormal(pyd.Normal):
+    def __init__(self, loc, scale, low=-1.0, high=1.0, eps=1e-6, max_action_norm: float = -1):
+        if isinstance(scale, float):
+            scale = torch.ones_like(loc) * scale
+
+        super().__init__(loc, scale, validate_args=False)
+        self.low = low
+        self.high = high
+        self.eps = eps
+        self.max_action_norm = max_action_norm
+
+    def _clamp(self, x):
+        clamped_x = torch.clamp(x, self.low + self.eps, self.high - self.eps)
+        x = x - x.detach() + clamped_x.detach()
+        return x
+
+    def sample(self, clip=None, sample_shape=None):
+        if sample_shape is None:
+            sample_shape = torch.Size()
+        shape = self._extended_shape(sample_shape)
+        eps = _standard_normal(shape, dtype=self.loc.dtype, device=self.loc.device)
+        eps *= self.scale
+        if clip is not None:
+            eps = torch.clamp(eps, -clip, clip)
+        x = self.loc + eps
+        x = self._clamp(x)
+        if self.max_action_norm > 0:
+            x = clip_action_norm(x, self.max_action_norm)
+        return x
+
+

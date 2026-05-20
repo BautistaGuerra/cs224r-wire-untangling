@@ -1,0 +1,185 @@
+"""The module contains high-level implementation of policies that contain the reference to the active environment."""
+
+import numpy as np
+import torch
+from stable_baselines3 import SAC
+from wire_untangling.policies.mlp_bc import MLPBCPolicy
+from wire_untangling.policies.flow_matching_policy import FlowMatchingPolicy
+from wire_untangling.utils.normalizer import Normalizer
+from wire_untangling.policies import PickPlaceExpertPolicy, build_obs_index_map
+
+
+def make_phase_active_features(
+    phase: int,
+    active_stick: int,
+    num_phases: int,
+    num_sticks: int,
+) -> np.ndarray:
+    features = np.zeros(num_phases + num_sticks, dtype=np.float32)
+    features[int(phase)] = 1.0
+    features[num_phases + int(active_stick)] = 1.0
+    return features
+
+
+class ModelPolicy(object):
+    def __init__(self, model_path:str, gym_env):
+        pass
+
+    def predict(self, obs:torch.Tensor) -> torch.Tensor:
+        pass
+
+    def reset(self):
+        pass
+
+
+class SACModelPolicy(ModelPolicy):
+    def __init__(self, model_path: str, gym_env):
+        super().__init__(model_path, gym_env)
+        self.model = SAC.load(model_path)
+        self.gym_env = gym_env
+
+    def predict(self, obs:torch.Tensor) ->torch.Tensor:
+        action, _ = self.model.predict(obs, deterministic=True)
+        return action
+
+
+class MLPBCModelPolicy(ModelPolicy):
+    def __init__(self, model_path: str, gym_env=None):
+        super().__init__(model_path, gym_env)
+        if torch.cuda.is_available():
+            self.device = torch.device("cuda")
+        elif torch.backends.mps.is_available():
+            self.device = torch.device("mps")
+        else:
+            self.device = torch.device("cpu")
+
+        ckpt = torch.load(model_path, map_location=self.device, weights_only=True)
+        self.action_dim = int(ckpt["action_dim"])
+        self.conditioning = ckpt.get("conditioning", "obs")
+        self.raw_obs_dim = int(ckpt.get("raw_obs_dim", ckpt["state_dim"]))
+        self.num_phases = int(ckpt.get("num_phases", 8))
+        self.num_sticks = int(ckpt.get("num_sticks", 1))
+        self.goal_yaw = float(getattr(gym_env, "goal_yaw", 0.0))
+        self._phase_tracker = None
+        self.model = MLPBCPolicy(
+            state_dim=int(ckpt["state_dim"]),
+            action_dim=self.action_dim,
+            hidden_dims=tuple(int(h) for h in ckpt["hidden_dims"]),
+            dropout=float(ckpt.get("dropout", 0.0)),
+        ).to(self.device)
+        self.model.load_state_dict(ckpt["model_state_dict"])
+        self.model.eval()
+
+        self.obs_norm = Normalizer(loc=ckpt["state_mean"], scale=ckpt["state_std"])
+
+    def set_gym_env(self, gym_env):
+        if self.conditioning != "phase-active":
+            return
+        obs_map = build_obs_index_map(gym_env)
+        self._phase_tracker = PickPlaceExpertPolicy(
+            obs_map,
+            goal_yaw=self.goal_yaw,
+        )
+
+    def _build_state(self, obs: np.ndarray) -> np.ndarray:
+        obs = np.asarray(obs, dtype=np.float32)
+        if self.conditioning == "obs":
+            return obs
+        if self.conditioning != "phase-active":
+            raise ValueError(f"Unsupported MLP-BC conditioning: {self.conditioning!r}")
+        if self._phase_tracker is None:
+            raise RuntimeError(
+                "phase-active MLP-BC requires a GymWrapper-backed phase tracker; "
+                "run it via run_policy/play_env so set_gym_env() is called."
+            )
+
+        phase = int(self._phase_tracker.phase)
+        active_stick = int(self._phase_tracker.active_stick)
+        # Advance the tracker using current obs, but discard its scripted action.
+        # The MLP still controls the robot.
+        self._phase_tracker.predict(obs)
+        features = make_phase_active_features(
+            phase,
+            active_stick,
+            num_phases=self.num_phases,
+            num_sticks=self.num_sticks,
+        )
+        return np.concatenate([obs, features], axis=0)
+
+    def predict(self, obs: np.ndarray) -> np.ndarray:
+        with torch.no_grad():
+            state_np = self._build_state(obs)
+            normed = self.obs_norm.normalize_torch(
+                torch.tensor(state_np, dtype=torch.float32, device=self.device),
+            ).unsqueeze(0)
+            action = self.model(normed)[0]
+        return action.cpu().numpy()
+
+    def reset(self):
+        if self._phase_tracker is not None:
+            self._phase_tracker.reset()
+
+
+class DPFMModelPolicy(ModelPolicy):
+    def __init__(self, model_path: str, gym_env, execute_steps: int | None = None, stochastic: bool = False):
+        super().__init__(model_path, gym_env)
+        self.gym_env = gym_env
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        checkpoint = torch.load(model_path, map_location=self.device, weights_only=True)
+        self.action_dim = int(checkpoint["action_dim"])
+        self.pred_horizon = int(checkpoint["pred_horizon"])
+        self.execute_steps = int(
+            execute_steps if execute_steps is not None
+            else checkpoint.get("execute_steps", max(1, self.pred_horizon // 2))
+        )
+        self.execute_steps = max(1, min(self.execute_steps, self.pred_horizon))
+        self.stochastic = stochastic
+
+        if "obs_norm" in checkpoint:
+            self.obs_norm = Normalizer.from_state_dict(checkpoint["obs_norm"])
+            self.action_norm = Normalizer.from_state_dict(checkpoint["action_norm"])
+
+        self.model = FlowMatchingPolicy(
+            state_dim=int(checkpoint["state_dim"]),
+            action_dim=self.action_dim,
+            pred_horizon=self.pred_horizon,
+            num_steps=int(checkpoint["num_steps"]),
+            device=self.device,
+        ).to(self.device)
+        self.model.load_state_dict(checkpoint["model_state_dict"])
+        self.model.eval()
+        self._chunk = None
+        self._chunk_idx = 0
+
+    def reset(self):
+        self._chunk = None
+        self._chunk_idx = 0
+
+    def _sample_chunk(self, obs: np.ndarray) -> np.ndarray:
+        obs = self.obs_norm.normalize(obs)
+        with torch.no_grad():
+            state = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
+            initial_noise = None
+            if not self.stochastic:
+                initial_noise = torch.zeros(
+                    1,
+                    self.pred_horizon * self.action_dim,
+                    dtype=torch.float32,
+                    device=self.device,
+                )
+            flat_chunk = self.model.schedule.sample(
+                self.model.model,
+                state,
+                initial_noise=initial_noise,
+            )
+        chunk = flat_chunk[0].reshape(self.pred_horizon, self.action_dim).cpu().numpy()
+        return self.action_norm.denormalize(chunk)
+
+    def predict(self, obs: np.ndarray) -> np.ndarray:
+        if self._chunk is None or self._chunk_idx >= min(self.execute_steps, self.pred_horizon):
+            self._chunk = self._sample_chunk(obs)
+            self._chunk_idx = 0
+        action = self._chunk[self._chunk_idx]
+        self._chunk_idx += 1
+        return action
