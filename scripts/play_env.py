@@ -37,7 +37,7 @@ from robosuite.wrappers import GymWrapper
 from wire_untangling.envs import StickReorderEnv
 from wire_untangling.policies import PickPlaceExpertPolicy, build_obs_index_map
 
-from wire_untangling.policies.env_policies import ModelPolicy,MLPBCModelPolicy, DPFMModelPolicy
+from wire_untangling.policies.policy_inference_wrappers import ModelPolicy,MLPBCModelPolicy, DPFMModelPolicy
 
 def _make_writer(path: str, fps: int):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
