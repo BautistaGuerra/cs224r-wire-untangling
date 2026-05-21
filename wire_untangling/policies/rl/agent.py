@@ -7,23 +7,22 @@ import copy
 
 from wire_untangling.policies.rl.critic import Critic
 from wire_untangling.policies.rl.actor import RRLActor
-from wire_untangling.policies.env_policies import DPFMModelPolicy
+from wire_untangling.utils.normalizer import maybe_unsqueeze, maybe_squeeze
 
 
 class TD3Agent(nn.Module):
-    def __init__(self, obs_shape:tuple[int], action_shape:tuple[int], bc_actor:DPFMModelPolicy, cfg):
+    def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
 
-        # self.bc_actor = bc_actor
         # create critics & actor
         self.critic = Critic(
-            obs_shape=cfg.obs_shape,
-            action_shape=cfg.action_shape,
+            state_dim=cfg.state_dim,
+            action_dim=cfg.action_dim,
             cfg=self.cfg
         )
         self.actor = RRLActor(
-            obs_shape=cfg.obs_shape, action_shape=cfg.action_shape, cfg=cfg)
+            state_dim=cfg.state_dim, action_dim=cfg.action_dim, cfg=cfg)
 
         self.critic_target = copy.deepcopy(self.critic)
         self.actor_target = copy.deepcopy(self.actor)
@@ -43,20 +42,22 @@ class TD3Agent(nn.Module):
         else:
             action = dist.sample(clip=clip)
         return action
-    #
-    # def act(self, obs: torch.Tensor, base_action: torch.Tensor, eval_mode=False, stddev=0.0, cpu=True) -> torch.Tensor:
-    #     """This function takes tensor and returns actions in tensor"""
-    #     assert not self.training
-    #     assert not self.actor.training
-    #     # Make a shallow copy of the observation dict
-    #     obs = copy.copy(obs)
-    #     # unsqueezed = self._maybe_unsqueeze_(obs)
-    #
-    #     action = self.act_(obs=obs, base_action=base_action, eval_mode=eval_mode, stddev=stddev, use_target=False, clip=None)
-    #     action = action.detach()
-    #     if cpu:
-    #         action = action.cpu()
-    #     return action
+
+    def act(self, obs: torch.Tensor, base_action: torch.Tensor, eval_mode=True, stddev=0.0, cpu=True) -> torch.Tensor:
+        """This function takes tensor and returns actions in tensor - used during the policy roll-out (aka inference)"""
+        assert not self.training
+        assert not self.actor.training
+
+        obs, was_unsqueezed = maybe_unsqueeze(obs)
+        base_action, _ = maybe_unsqueeze(base_action)
+
+        action = self.act_(obs=obs, base_action=base_action, eval_mode=eval_mode, stddev=stddev, use_target=False, clip=None)
+        action = maybe_squeeze(action, was_unsqueezed)
+
+        action = action.detach()
+        if cpu:
+            action = action.cpu()
+        return action
 
     def update_critic(self, obs:torch.Tensor, action:torch.Tensor, reward: torch.Tensor,
         discount: torch.Tensor, next_obs: torch.Tensor, next_action_base: torch.Tensor, stddev:float):

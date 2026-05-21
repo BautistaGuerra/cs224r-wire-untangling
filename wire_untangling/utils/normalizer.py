@@ -45,7 +45,7 @@ class Normalizer:
 
     # Floor for scale values.  Any dimension whose standard deviation is below
     # this threshold is treated as constant; its normalized output will be ~0.
-    EPS = 1e-6
+    EPS = 1e-1
 
     def __init__(
         self,
@@ -189,8 +189,25 @@ class Normalizer:
         )
 
 
-# These are the methods that normalize and clip actions sampled from RL policy
-# TODO: The code is taken from the residual-offpolicy-rl Amazon codebase. Understand it well. It may explain behavior of PDFM
+# ── Tensor batch-dimension helpers ──────────────────────────────────────────
+# Adapted from residual-offpolicy-rl (Amazon, CC-BY-NC-4.0)
+
+def maybe_unsqueeze(t: torch.Tensor) -> tuple[torch.Tensor, bool]:
+    """Add a leading batch dim if tensor is 1-D. Returns (tensor, was_unsqueezed)."""
+    if t.dim() == 1:
+        return t.unsqueeze(0), True
+    return t, False
+
+
+def maybe_squeeze(t: torch.Tensor, was_unsqueezed: bool) -> torch.Tensor:
+    """Remove the leading batch dim if it was added by maybe_unsqueeze."""
+    if was_unsqueezed:
+        return t.squeeze(0)
+    return t
+
+
+# ── Action norm clipping ────────────────────────────────────────────────────
+# Taken from the residual-offpolicy-rl Amazon codebase.
 from torch.distributions.utils import _standard_normal
 def clip_action_norm(action, max_norm):
     assert max_norm > 0

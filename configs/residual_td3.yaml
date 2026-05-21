@@ -1,0 +1,56 @@
+residual_td3:
+  # ── Dimensions ──────────────────────────────────────────────────────
+  # Inferred from BC checkpoint at runtime (state_mean.shape, action_norm, etc.)
+  state_dim: null
+  action_dim: null
+
+  device: cuda
+
+  # ── Exploration noise schedule ──────────────────────────────────────
+  # Noise std linearly decays from stddev_max → stddev_min over stddev_decay_steps.
+  # stddev_clip truncates sampled noise to [-clip, clip] in TruncatedNormal.
+  stddev_clip: 0.3
+  stddev_max: 0.1
+  stddev_min: 0.01
+  stddev_decay_steps: 100000
+
+  # ── Training loop ──────────────────────────────────────────────────
+  total_timesteps: 300000
+  batch_size: 256
+  buffer_size: 200000
+  # Number of random-action steps before learning begins (fills replay buffer)
+  learning_starts: 5000
+  # Discount factor for Bellman target: y = r + gamma * (1 - done) * Q_target
+  gamma: 0.99
+  # How many env steps between each gradient update
+  update_every_n_steps: 1
+  # Actor is updated once every this many critic updates (TD3 delayed policy update)
+  actor_update_every: 2
+  # Train critic only (no actor updates) for this many initial steps
+  critic_warmup_steps: 5000
+
+  # ── Gradient clipping ──────────────────────────────────────────────
+  # Max gradient L2 norm per optimizer step
+  actor_grad_clip_norm: 1.0
+  critic_grad_clip_norm: 1.0
+
+  # ── Actor (residual policy) ────────────────────────────────────────
+  actor:
+    hidden_dim: 256
+    # Dropout probability in actor MLP (0.0 = disabled)
+    p_dropout: 0.0
+    # Tanh output is multiplied by action_scale; keeps initial residuals small
+    # relative to the base BC action. Typical range: 0.05–0.3
+    action_scale: 0.3
+    lr: 1.0e-5
+
+  # ── Critic (Q-function ensemble) ───────────────────────────────────
+  critic:
+    hidden_dim: 256
+    # Total number of independent Q-heads in the ensemble
+    num_critics: 5
+    # How many heads to sample for clipped double-Q target (min over subset)
+    num_sampled_critics: 2
+    lr: 3.0e-4
+    # EMA rate for target network: target = tau * online + (1 - tau) * target
+    tau: 0.005

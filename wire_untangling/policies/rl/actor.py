@@ -20,19 +20,19 @@ def init_actor_weights(m):
 class RRLActor(nn.Module):
     """A class that implements a residual RL actor."""
 
-    def __init__(self,  obs_shape, action_shape, cfg):
+    def __init__(self,  state_dim, action_dim, cfg):
         super(RRLActor, self).__init__()
         self.cfg = cfg
 
         self.policy = nn.Sequential(
-            nn.Linear(obs_shape[0] + action_shape[0], cfg.hidden_dim),
+            nn.Linear(state_dim[0] + action_dim[0], cfg.hidden_dim),
             nn.LayerNorm(cfg.hidden_dim),
             nn.Dropout(cfg.p_dropout),
             nn.ReLU(inplace=True),
             nn.Linear(cfg.hidden_dim, cfg.hidden_dim),
             nn.LayerNorm(cfg.hidden_dim),
             nn.ReLU(inplace=True),
-            nn.Linear(cfg.hidden_dim, action_shape[0]),
+            nn.Linear(cfg.hidden_dim, action_dim[0]),
             nn.Tanh()
         )
 
@@ -46,10 +46,10 @@ class RRLActor(nn.Module):
         mu: torch.Tensor = self.policy(policy_input)
 
         # Scale the mean by action_scale
-        # NOTE: std is already in environment action space (more interpretable)
+        # NOTE: std is a hyperparameter (more interpretable)
         scaled_mu = mu * self.cfg.action_scale
 
-        # Create distribution with scaled mean but environment-scale std
+        # Create distribution with scaled mean and std as a hyperparameter (not learned!)
         action_dist = TruncatedNormal(scaled_mu, std)
 
         return action_dist  # noqa: RET504

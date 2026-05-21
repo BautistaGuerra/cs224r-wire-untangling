@@ -20,13 +20,13 @@ def init_critic_weights(m):
 
 class Critic(nn.Module):
     """Simple possible critic network. Accepts the observations (proprioceptions) and actions"""
-    def __init__(self, obs_shape, action_shape, cfg):
+    def __init__(self, state_dim, action_dim, cfg):
         """Build an ensemble of Q-functions for clipped target estimation."""
         super().__init__()
         self.cfg = cfg #num_experts = num_experts
 
         self.critics = nn.ModuleList([nn.Sequential(
-            nn.Linear(obs_shape[0] + action_shape[0], cfg.critic.hidden_dim),
+            nn.Linear(state_dim[0] + action_dim[0], cfg.critic.hidden_dim),
             nn.LayerNorm(cfg.critic.hidden_dim),
             nn.ReLU(inplace=True),
             nn.Linear(cfg.critic.hidden_dim, cfg.critic.hidden_dim),

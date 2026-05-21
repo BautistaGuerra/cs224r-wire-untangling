@@ -48,6 +48,7 @@ def make_action_bounds(config: dict) -> tuple[np.ndarray, np.ndarray]:
     )
     try:
         low, high = raw_env.action_spec
+        print(f'Environment created with action bounds. low: {low}, high: {high}')
         return np.asarray(low, dtype=np.float32), np.asarray(high, dtype=np.float32)
     finally:
         raw_env.close()

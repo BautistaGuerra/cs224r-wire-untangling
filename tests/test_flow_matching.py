@@ -98,16 +98,18 @@ def test_dpfm_policy_executes_chunk_before_requerying():
     policy.action_low = np.array([-1.0, -1.0], dtype=np.float32)
     policy.action_high = np.array([1.0, 1.0], dtype=np.float32)
     policy._chunk = None
+    policy._nchunk = None
     policy._chunk_idx = 0
     calls = {"n": 0}
 
     def sample_chunk(self, obs):
         calls["n"] += 1
         offset = 10 * calls["n"]
-        return np.array(
+        chunk = np.array(
             [[offset + i, offset + i + 0.5] for i in range(self.pred_horizon)],
             dtype=np.float32,
         )
+        return chunk, chunk
 
     policy._sample_chunk = types.MethodType(sample_chunk, policy)
 

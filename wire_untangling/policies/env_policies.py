@@ -1,10 +1,12 @@
 """The module contains high-level implementation of policies that contain the reference to the active environment."""
+from typing import Tuple
 
 import numpy as np
 import torch
 from stable_baselines3 import SAC
 from wire_untangling.policies.mlp_bc import MLPBCPolicy
 from wire_untangling.policies.flow_matching_policy import FlowMatchingPolicy
+from wire_untangling.policies.rl.agent import TD3Agent
 from wire_untangling.utils.normalizer import Normalizer
 from wire_untangling.policies import PickPlaceExpertPolicy, build_obs_index_map
 
@@ -149,14 +151,18 @@ class DPFMModelPolicy(ModelPolicy):
         ).to(self.device)
         self.model.load_state_dict(checkpoint["model_state_dict"])
         self.model.eval()
+        # Unnormalized (i.e. in the original action space) chunk
         self._chunk = None
+        # normalized chunk for residual RL
+        self._nchunk = None
         self._chunk_idx = 0
 
     def reset(self):
         self._chunk = None
+        self._nchunk = None
         self._chunk_idx = 0
 
-    def _sample_chunk(self, obs: np.ndarray) -> np.ndarray:
+    def _sample_chunk(self, obs: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         obs = self.obs_norm.normalize(obs)
         with torch.no_grad():
             state = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
@@ -174,12 +180,79 @@ class DPFMModelPolicy(ModelPolicy):
                 initial_noise=initial_noise,
             )
         chunk = flat_chunk[0].reshape(self.pred_horizon, self.action_dim).cpu().numpy()
-        return self.action_norm.denormalize(chunk)
+        # Return both unnormalized (original action space) and normalized action chunks
+        return self.action_norm.denormalize(chunk), chunk
 
-    def predict(self, obs: np.ndarray) -> np.ndarray:
+    def predict_norm(self, obs: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Predict both unnormalized, as well as normalized action. Normalized is used for residual RL."""
         if self._chunk is None or self._chunk_idx >= min(self.execute_steps, self.pred_horizon):
-            self._chunk = self._sample_chunk(obs)
+            self._chunk, self._nchunk = self._sample_chunk(obs)
             self._chunk_idx = 0
         action = self._chunk[self._chunk_idx]
+        naction = self._nchunk[self._chunk_idx]
         self._chunk_idx += 1
+        return action, naction
+
+    def predict(self, obs: np.ndarray) -> np.ndarray:
+        """Predict unnormalized action value, i.e. in the original policy scope. Used for rollouts."""
+        action, _ = self.predict_norm(obs)
         return action
+
+
+class ResidualRLPolicy(ModelPolicy):
+    """A residual RL policy. Incorporates the base behavior cloning policy."""
+
+    def __init__(self, rl_model_path: str, base_model_path: str, base_policy: ModelPolicy, gym_env, rrl_cfg):
+        super().__init__(rl_model_path, gym_env)
+        self.gym_env = gym_env
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.base_policy = base_policy
+
+        # Note: we assume that the checkpoint contains both the RL model as well as
+        checkpoint = torch.load(base_model_path, map_location=self.device, weights_only=True)
+        self.action_dim = (int(checkpoint["action_dim"]))
+        self.state_dim = (int(checkpoint["state_dim"]))
+        rrl_cfg.state_dim =self.state_dim
+        rrl_cfg.action_dim = self.action_dim
+
+        rl_checkpoint = torch.load(rl_model_path, map_location=self.device, weights_only=True)
+        if "obs_norm" in checkpoint:
+            self.obs_norm = Normalizer.from_state_dict(checkpoint["obs_norm"])
+            self.action_norm = Normalizer.from_state_dict(checkpoint["action_norm"])
+
+        self.rrl_model = TD3Agent(rrl_cfg)
+        self.rrl_model.load_state_dict(rl_checkpoint["model_state_dict"])
+        self.rrl_model.eval()
+
+
+    def reset(self):
+        self.base_policy.reset()
+
+    def predict_rrl(self, obs: np.ndarray) -> np.ndarray:
+
+        # NOTE: we must store normalized observations in the buffer and pass these to residual RL during the training.
+
+        # Get the base action - unscaled / unnormalized back to the input [-1, 1] space
+        _, base_naction = self.base_policy.predict_norm(obs)
+        with torch.no_grad():
+            # Normalize observations again - now for the residual RL.
+            nobs = self.obs_norm.normalize(obs)
+            # Sample action from the residual RL policy that is within [-action_scale, action_scale]
+            # Note: in the original residual RL we do not apply any scaling here. It will not be sampled from the RRL
+            # policy; no noise will be added - just mean value of the predicted action is reported.
+            # Final scaling will be applied by the training / evaluation script
+            residual_action = self.rrl_model.act(
+                torch.Tensor(nobs).to(self.device),
+                torch.Tensor(base_naction).to(self.device),
+                eval_mode=True).cpu().numpy()
+        # Here, the prediction is in the normalized space
+        final_naction = residual_action + base_naction
+        final_action = self.action_norm.denormalize(final_naction)
+        return final_action, residual_action, base_naction
+
+
+    def predict(self, obs: np.ndarray) -> np.ndarray:
+        """Predict unnormalized action value, i.e. in the original policy scope. Used for rollouts."""
+        action, _, _ = self.predict_rrl(obs)
+        return action
+
