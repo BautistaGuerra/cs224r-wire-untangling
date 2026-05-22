@@ -85,8 +85,15 @@ class TD3Agent(nn.Module):
 
         self.critic_opt.zero_grad(set_to_none=True)
         loss.backward()
-        # critic_grad_norm = torch.nn.utils.clip_grad_norm_(self.critic.parameters(), self.cfg.critic_grad_clip_norm)
+        critic_grad_norm = torch.nn.utils.clip_grad_norm_(self.critic.parameters(), self.cfg.critic_grad_clip_norm)
         self.critic_opt.step()
+
+        return {
+            "train/critic_loss": loss.item(),
+            "train/critic_qt": y.mean().item(),
+            "train/critic_grad_norm": critic_grad_norm.item(),
+            "_target_q": y.detach().cpu(),
+        }
 
     def actor_loss_(self, obs: torch.Tensor, base_action: torch.Tensor,):
         # Act on the residual RL policy. Don't add the random noise, just get a simple mean of the action value
@@ -102,15 +109,21 @@ class TD3Agent(nn.Module):
         # Q value for the purpose of the policy optimization, so we are taking mean value here.
         q_values = self.critic.q_value(obs, combined_action, aggregate_type='mean')
         actor_loss = -q_values.mean()
-        return actor_loss
+        return actor_loss, action_pred
 
     def update_actor(self, obs:torch.Tensor, action_base:torch.Tensor):
-        actor_loss = self.actor_loss_(obs, action_base)
+        actor_loss, action_pred = self.actor_loss_(obs, action_base)
         # Standard packprop step
         self.actor_opt.zero_grad(set_to_none=True)
         actor_loss.backward()
         actor_grad_norm = torch.nn.utils.clip_grad_norm_(self.actor.parameters(), self.cfg.actor_grad_clip_norm)
         self.actor_opt.step()
+
+        return {
+            "train/actor_loss": actor_loss.item(),
+            "train/actor_grad_norm": actor_grad_norm.item(),
+            "_actions": action_pred.detach().cpu(),
+        }
 
     def update(self, batch, update_actor, stddev):
         for key in ['next_reward', 'gamma', 'next_done']:
@@ -132,7 +145,7 @@ class TD3Agent(nn.Module):
         effective_discount = discount * (1-next_done)
 
         # Regular critic update step
-        self.update_critic(
+        metrics = self.update_critic(
             obs=obs,
             action=action,
             reward=reward,
@@ -145,9 +158,12 @@ class TD3Agent(nn.Module):
         # Update the target critic network using EMA (Polyakov's) update
         self.update_target_ema(self.critic, self.critic_target, self.cfg.critic.tau)
         if not update_actor:
-            return
+            return metrics
 
-        self.update_actor(obs, action_base)
+        actor_metrics = self.update_actor(obs, action_base)
+        metrics.update(actor_metrics)
+        self.update_target_ema(self.actor, self.actor_target, self.cfg.critic.tau)
+        return metrics
 
     def update_target_ema(self, net, target_net, tau):
         for param, target_param in zip(net.parameters(), target_net.parameters()):

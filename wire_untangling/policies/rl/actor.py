@@ -25,14 +25,14 @@ class RRLActor(nn.Module):
         self.cfg = cfg
 
         self.policy = nn.Sequential(
-            nn.Linear(state_dim[0] + action_dim[0], cfg.hidden_dim),
-            nn.LayerNorm(cfg.hidden_dim),
-            nn.Dropout(cfg.p_dropout),
+            nn.Linear(state_dim[0] + action_dim[0], cfg.actor.hidden_dim),
+            nn.LayerNorm(cfg.actor.hidden_dim),
+            nn.Dropout(cfg.actor.p_dropout),
             nn.ReLU(inplace=True),
-            nn.Linear(cfg.hidden_dim, cfg.hidden_dim),
-            nn.LayerNorm(cfg.hidden_dim),
+            nn.Linear(cfg.actor.hidden_dim, cfg.actor.hidden_dim),
+            nn.LayerNorm(cfg.actor.hidden_dim),
             nn.ReLU(inplace=True),
-            nn.Linear(cfg.hidden_dim, action_dim[0]),
+            nn.Linear(cfg.actor.hidden_dim, action_dim[0]),
             nn.Tanh()
         )
 
@@ -47,7 +47,7 @@ class RRLActor(nn.Module):
 
         # Scale the mean by action_scale
         # NOTE: std is a hyperparameter (more interpretable)
-        scaled_mu = mu * self.cfg.action_scale
+        scaled_mu = mu * self.cfg.actor.action_scale
 
         # Create distribution with scaled mean and std as a hyperparameter (not learned!)
         action_dist = TruncatedNormal(scaled_mu, std)

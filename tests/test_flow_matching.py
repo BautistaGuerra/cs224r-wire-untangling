@@ -31,7 +31,7 @@ def test_flow_matching_sample_is_unclamped_by_default():
         def forward(self, action, state, timestep):
             return torch.full_like(action, -10.0)
 
-    schedule = FlowMatchingSchedule(action_dim=5, device="cpu", num_steps=2)
+    schedule = FlowMatchingSchedule(action_dim=5, device="cpu", num_integration_steps=2)
     state = torch.zeros(3, 4)
     sample = schedule.sample(ConstantVelocity(), state)
 
@@ -44,7 +44,7 @@ def test_flow_matching_sample_accepts_deterministic_initial_noise():
         def forward(self, action, state, timestep):
             return torch.ones_like(action)
 
-    schedule = FlowMatchingSchedule(action_dim=4, device="cpu", num_steps=2)
+    schedule = FlowMatchingSchedule(action_dim=4, device="cpu", num_integration_steps=2)
     state = torch.zeros(2, 3)
     initial_noise = torch.zeros(2, 4)
     sample_a = schedule.sample(ConstantVelocity(), state, initial_noise=initial_noise)

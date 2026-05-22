@@ -130,7 +130,9 @@ class DPFMModelPolicy(ModelPolicy):
 
         checkpoint = torch.load(model_path, map_location=self.device, weights_only=True)
         self.action_dim = int(checkpoint["action_dim"])
+        self.state_dim = int(checkpoint["state_dim"])
         self.pred_horizon = int(checkpoint["pred_horizon"])
+        self.num_integration_steps = int(checkpoint["num_integration_steps"])
         self.execute_steps = int(
             execute_steps if execute_steps is not None
             else checkpoint.get("execute_steps", max(1, self.pred_horizon // 2))
@@ -143,10 +145,10 @@ class DPFMModelPolicy(ModelPolicy):
             self.action_norm = Normalizer.from_state_dict(checkpoint["action_norm"])
 
         self.model = FlowMatchingPolicy(
-            state_dim=int(checkpoint["state_dim"]),
+            state_dim=self.state_dim,
             action_dim=self.action_dim,
             pred_horizon=self.pred_horizon,
-            num_steps=int(checkpoint["num_steps"]),
+            num_integration_steps=self.num_integration_steps,
             device=self.device,
         ).to(self.device)
         self.model.load_state_dict(checkpoint["model_state_dict"])
@@ -229,9 +231,15 @@ class ResidualRLPolicy(ModelPolicy):
         self.base_policy.reset()
 
     def predict_rrl(self, obs: np.ndarray) -> np.ndarray:
-
-        # NOTE: we must store normalized observations in the buffer and pass these to residual RL during the training.
-
+        """Predicts the action using residual RL.
+        Args:
+            obs: UNNORMALIZED observations
+        Returns:
+            final_action: final action, in the (denormalized) action space
+            residual_action: residual action, as predicted by RRL
+            base_naction: a base normalized action from the BC policy. we return it so we could store
+                normalized observations in the buffer and pass these to residual RL during the training.
+        """
         # Get the base action - unscaled / unnormalized back to the input [-1, 1] space
         _, base_naction = self.base_policy.predict_norm(obs)
         with torch.no_grad():
@@ -246,10 +254,17 @@ class ResidualRLPolicy(ModelPolicy):
                 torch.Tensor(base_naction).to(self.device),
                 eval_mode=True).cpu().numpy()
         # Here, the prediction is in the normalized space
-        final_naction = residual_action + base_naction
-        final_action = self.action_norm.denormalize(final_naction)
-        return final_action, residual_action, base_naction
+        # final_naction = residual_action + base_naction
+        # final_action = self.action_norm.denormalize(final_naction)
+        # return final_action, residual_action, base_naction
+        return ResidualRLPolicy.combine_actions(self.action_norm, base_naction, residual_action)
 
+    @staticmethod
+    def combine_actions(action_norm, base_naction, residual_action: np.ndarray) -> np.ndarray:
+        # Here, the prediction is in the normalized space
+        final_naction = residual_action + base_naction
+        final_action = action_norm.denormalize(final_naction)
+        return final_action, residual_action, base_naction
 
     def predict(self, obs: np.ndarray) -> np.ndarray:
         """Predict unnormalized action value, i.e. in the original policy scope. Used for rollouts."""
