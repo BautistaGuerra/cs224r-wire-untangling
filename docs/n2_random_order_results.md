@@ -76,14 +76,27 @@ This refines the phase/context story:
 
 ## Next Steps
 
-1. Train a learned context model that predicts `phase` and `active_stick` from
-   state or short history, then evaluate phase-active MLP-BC using learned
-   labels instead of the scripted tracker.
-2. Increase N=2 difficulty one axis at a time:
+1. **Learn the context signal.** Train a predictor for `phase` and
+   `active_stick` from state, then from short history if transition errors are
+   common. Evaluate phase-active MLP-BC with learned labels instead of the
+   scripted tracker.
+2. **Test diffusion / flow matching on this variant.** Re-run DPFM on the
+   balanced random-order dataset with:
+   - observation only,
+   - observation + phase,
+   - observation + phase + active stick.
+   If explicit context helps DPFM, that supports the hypothesis that sharp
+   phase transitions are a major failure mode.
+3. **Increase N=2 difficulty one axis at a time.** Keep reporting obs-only,
+   oracle-context, learned-context, and diffusion baselines while adding:
    - wider initial and goal ranges,
    - cross-side or crossing goals,
    - closer starts / interference cases,
-   - retry-focused failure modes.
-3. Apply residual RL only after selecting a task where BC is imperfect but not
-   hopeless, ideally in the 40-80% success range.
-4. Report success by order and failure phase for every harder N=2 variant.
+   - retry-focused failure modes after missed grasps.
+4. **Use residual RL only on the right difficulty band.** Apply residual RL
+   after selecting a task where the base policy is imperfect but not hopeless,
+   ideally around 40-80% success. Track whether residual corrections
+   concentrate in missed-grasp, placement, retry, or phase-transition failures.
+5. **Keep phase-wise diagnostics standard.** For every harder N=2 variant,
+   report total success, per-order success, failure phase, and representative
+   rollout videos.
