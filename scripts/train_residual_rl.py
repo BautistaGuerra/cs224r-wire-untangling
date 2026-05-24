@@ -22,7 +22,7 @@ from robosuite.wrappers import GymWrapper
 from wire_untangling.envs import StickReorderEnv
 from wire_untangling.policies.rl.agent import TD3Agent
 from wire_untangling.policies.policy_inference_wrappers import DPFMModelPolicy, ResidualRLPolicy
-from wire_untangling.utils.normalizer import Normalizer
+from wire_untangling.utils.normalizer import Normalizer, DEFAULT_SCALE_OBSERVATIONS, DEFAULT_SCALE_ACTIONS
 import scripts.rrl_env_creation as rrl_env
 
 # ── Config loading ───────────────────────────────────────────────────────────
@@ -238,8 +238,8 @@ def train(
         # Store the transition — everything is in z-score normalized space
         replay_buffer.add(
             obs=nobs,
-            action=combined_action,
-            action_base=base_naction + residual_naction,
+            action=base_naction+residual_naction,
+            action_base=base_naction,
             next_obs=next_nobs,
             next_action_base=next_base_naction,
             reward=reward,
@@ -264,6 +264,7 @@ def train(
         # Gradient updates: start after warmup, every update_every_n_steps
         metrics = None
         if global_step >= td3_cfg.learning_starts and global_step % td3_cfg.update_every_n_steps == 0:
+            # Allow std. deviation of actions to be high initially then diminish
             stddev = linear_schedule(
                 global_step - td3_cfg.learning_starts,
                 td3_cfg.stddev_max, td3_cfg.stddev_min, td3_cfg.stddev_decay_steps,

@@ -6,7 +6,7 @@ import torch
 
 from scripts.train_flow_matching import load_data
 from wire_untangling.utils.normalizer import Normalizer
-from scripts.play_env import DPFMModelPolicy
+from wire_untangling.policies.policy_inference_wrappers import DPFMModelPolicy
 from wire_untangling.policies.flow_matching_policy import FlowMatchingSchedule
 
 

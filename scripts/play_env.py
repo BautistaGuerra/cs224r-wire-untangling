@@ -37,7 +37,7 @@ from robosuite.wrappers import GymWrapper
 from wire_untangling.envs import StickReorderEnv
 from wire_untangling.policies import PickPlaceExpertPolicy, build_obs_index_map
 
-from wire_untangling.policies.policy_inference_wrappers import ModelPolicy,MLPBCModelPolicy, DPFMModelPolicy
+from wire_untangling.policies.policy_inference_wrappers import ModelPolicy, MLPBCModelPolicy, DPFMModelPolicy, ResidualRLPolicy
 
 def _make_writer(path: str, fps: int):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -276,6 +276,10 @@ if __name__ == "__main__":
                         help="Override DPFM chunk actions executed before re-planning")
     parser.add_argument("--dpfm-stochastic", action="store_true", default=True,
                         help="Use random Flow Matching initial noise instead of deterministic zero-noise sampling")
+    parser.add_argument("--rrl-checkpoint", type=str, default=None,
+                        help="Path to residual RL (TD3) checkpoint (.pt)")
+    parser.add_argument("--rrl-config", type=str, default="configs/residual_td3.yaml",
+                        help="Path to residual TD3 YAML config")
     parser.add_argument("--expert", action="store_true", help="Run scripted pick-and-place expert (single stick)")
     parser.add_argument("--num-sticks", type=int, default=None, help="Override number of sticks")
     args = parser.parse_args()
@@ -290,7 +294,7 @@ if __name__ == "__main__":
         num_sticks = None
     else:
         # Preserve the old one-stick default for BC / expert checkpoint smoke tests.
-        num_sticks = 1 if (args.expert or args.dpfm_checkpoint or args.bc_checkpoint) else 3
+        num_sticks = 1 if (args.expert or args.dpfm_checkpoint or args.bc_checkpoint or args.rrl_checkpoint) else 3
     env = make_env(
         render=args.render,
         record=bool(args.record),
@@ -312,15 +316,33 @@ if __name__ == "__main__":
     elif args.bc_checkpoint:
         policy = MLPBCModelPolicy(args.bc_checkpoint, env)
         run_policy(env, policy, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record)
-    elif args.sac_checkpoint:
-        policy = SACModelPolicy(args.sac_checkpoint, env)
-        run_policy(env, policy, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record)
+    # elif args.sac_checkpoint:
+    #     policy = SACModelPolicy(args.sac_checkpoint, env)
+    #     run_policy(env, policy, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record)
     elif args.dpfm_checkpoint:
         policy = DPFMModelPolicy(
             args.dpfm_checkpoint,
             env,
             execute_steps=args.dpfm_execute_steps,
             stochastic=args.dpfm_stochastic,
+        )
+        run_policy(env, policy, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record)
+    elif args.rrl_checkpoint:
+        from scripts.train_residual_rl import DictConfig
+        if not args.dpfm_checkpoint:
+            parser.error("--rrl-checkpoint requires --dpfm_checkpoint (the base DPFM policy)")
+        with open(args.rrl_config) as f:
+            rrl_raw = yaml.safe_load(f).get("residual_td3", {})
+        base_policy = DPFMModelPolicy(args.dpfm_checkpoint, env, stochastic=args.dpfm_stochastic)
+        rrl_raw["state_dim"] = (int(base_policy.state_dim),)
+        rrl_raw["action_dim"] = (int(base_policy.action_dim),)
+        rrl_cfg = DictConfig(rrl_raw)
+        policy = ResidualRLPolicy(
+            rl_model_path=args.rrl_checkpoint,
+            base_model_path=args.dpfm_checkpoint,
+            base_policy=base_policy,
+            gym_env=env,
+            rrl_cfg=rrl_cfg,
         )
         run_policy(env, policy, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record)
     else:

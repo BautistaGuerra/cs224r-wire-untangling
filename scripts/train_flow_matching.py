@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader, TensorDataset
 import torch
 
 from wire_untangling.policies.flow_matching_policy import FlowMatchingPolicy, flow_matching_loss
-from wire_untangling.utils.normalizer import Normalizer
+from wire_untangling.utils.normalizer import Normalizer, DEFAULT_SCALE_OBSERVATIONS, DEFAULT_SCALE_ACTIONS
 import scripts.rrl_env_creation as rrl_env
 
 def load_config(
@@ -202,8 +202,9 @@ def load_data(
     flat_actions = np.concatenate(all_actions, axis=0)
 
     # Initialize the normalizer from data
-    obs_norm = Normalizer.from_data(flat_obs)
-    action_norm = Normalizer.from_data(flat_actions, clip_low=action_low, clip_high=action_high)
+    obs_norm = Normalizer.from_data(flat_obs, default_scale=DEFAULT_SCALE_OBSERVATIONS)
+    action_norm = Normalizer.from_data(flat_actions, clip_low=action_low, clip_high=action_high,
+                                       default_scale=DEFAULT_SCALE_ACTIONS)
 
     episode_ends = np.cumsum(episode_lengths)
     indices = create_chunk_indices(episode_ends, chunk_size, pad_after=chunk_size - 1)

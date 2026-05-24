@@ -32,6 +32,8 @@ from torch import distributions as pyd
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_SCALE_OBSERVATIONS = 1e-3
+DEFAULT_SCALE_ACTIONS = 1e-1
 
 class Normalizer:
     """Per-dimension z-score normalizer that works with both numpy and torch.
@@ -54,6 +56,7 @@ class Normalizer:
         clip_low: np.ndarray | torch.Tensor | None = None,
         clip_high: np.ndarray | torch.Tensor | None = None,
         warn_on_clip: bool = False,
+        default_scale: float = EPS
     ):
         """Construct a Normalizer from pre-computed statistics.
 
@@ -67,9 +70,12 @@ class Normalizer:
                        denormalization.  Typically the env's action_high.
             warn_on_clip: If True, log a warning when denormalized values
                        exceed clip bounds.
+            default_scale: the default gard value on the stnadard deviation. If the
+                        std. dev of the dimension is < default_scale, std. dev is
+                        set to default scale to prevent blow of OOD values.
         """
         self.loc = np.asarray(loc, dtype=np.float32)
-        self.scale = np.maximum(np.asarray(scale, dtype=np.float32), self.EPS)
+        self.scale = np.maximum(np.asarray(scale, dtype=np.float32), default_scale)
         self.clip_low = np.asarray(clip_low, dtype=np.float32) if clip_low is not None else None
         self.clip_high = np.asarray(clip_high, dtype=np.float32) if clip_high is not None else None
         self.warn_on_clip = warn_on_clip
@@ -179,6 +185,7 @@ class Normalizer:
         data: np.ndarray,
         clip_low: np.ndarray | None = None,
         clip_high: np.ndarray | None = None,
+        default_scale: float = EPS
     ) -> Normalizer:
         """Compute per-dimension mean/std from a (N, D) dataset and build a Normalizer."""
         return cls(
@@ -186,6 +193,7 @@ class Normalizer:
             scale=data.std(axis=0).astype(np.float32),
             clip_low=clip_low,
             clip_high=clip_high,
+            default_scale=default_scale
         )
 
 
@@ -245,13 +253,18 @@ class TruncatedNormal(pyd.Normal):
         if sample_shape is None:
             sample_shape = torch.Size()
         shape = self._extended_shape(sample_shape)
+        # Sample the "additional noise" from the unit normal
         eps = _standard_normal(shape, dtype=self.loc.dtype, device=self.loc.device)
+        # Scale it down to the residual action scale
         eps *= self.scale
         if clip is not None:
+            # If we request, clip the predicted action into the [-clip; clip] range.
             eps = torch.clamp(eps, -clip, clip)
+        # Add residual noise to the predicted mean.
         x = self.loc + eps
         x = self._clamp(x)
         if self.max_action_norm > 0:
+            # Not used currently
             x = clip_action_norm(x, self.max_action_norm)
         return x
 

@@ -70,7 +70,10 @@ class TD3Agent(nn.Module):
                 clip=self.cfg.stddev_clip,
                 use_target=True,
             )
-            next_action = torch.clamp(next_action_base + next_residual_action, -1.0, 1.0)
+            # next_action = torch.clamp(next_action_base + next_residual_action, -1.0, 1.0)
+            # Note: we believe that we should not clip the action by any means, as agent always work with normalized
+            # action space.
+            next_action = next_action_base + next_residual_action
             # For the purpose of updating critic, take the min aggregation of the target q-values
             target_q_min = self.critic_target.q_value(next_obs, next_action, aggregate_type='min')
             y = (reward + (discount * target_q_min)).detach()
@@ -102,8 +105,12 @@ class TD3Agent(nn.Module):
 
         # NOTE: actual ResFiT adds L2 penalty on action here
 
-        # Combine the base action with the predicted action. Clamp to the valid range [-1, 1] to match environment.
-        combined_action = torch.clamp(base_action + action_pred, -1.0, 1.0)
+        # Combine the base action with the predicted action.
+        # combined_action = torch.clamp(base_action + action_pred, -1.0, 1.0)
+        # Note: we believe that we should not clip the action by any means, as agent always work with normalized
+        # action space.
+        combined_action = base_action + action_pred
+
 
         # Note: we are different from the paper in taking MEAN, not min() here. We don't want to underestimate
         # Q value for the purpose of the policy optimization, so we are taking mean value here.
@@ -156,13 +163,13 @@ class TD3Agent(nn.Module):
         )
 
         # Update the target critic network using EMA (Polyakov's) update
-        self.update_target_ema(self.critic, self.critic_target, self.cfg.critic.tau)
+        self.update_target_ema(self.critic, self.critic_target, self.cfg.tau)
         if not update_actor:
             return metrics
 
         actor_metrics = self.update_actor(obs, action_base)
         metrics.update(actor_metrics)
-        self.update_target_ema(self.actor, self.actor_target, self.cfg.critic.tau)
+        self.update_target_ema(self.actor, self.actor_target, self.cfg.tau)
         return metrics
 
     def update_target_ema(self, net, target_net, tau):
