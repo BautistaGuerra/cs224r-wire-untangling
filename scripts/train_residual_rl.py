@@ -113,16 +113,17 @@ def linear_schedule(step: int, max_val: float, min_val: float, decay_steps: int)
 def train(
     config: dict,
     dpfm_checkpoint: str,
-    seed: int = 42,
+    seed: int = None,
     use_wandb: bool = True,
     checkpoint_dir: str = "checkpoints/td3",
 ):
     td3_raw = config.get("residual_td3", {})
     env_cfg = config.get("env", {})
 
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
+    if seed is not None:
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

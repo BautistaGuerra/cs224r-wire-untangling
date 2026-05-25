@@ -72,7 +72,9 @@ class MLPBCModelPolicy(ModelPolicy):
         self.model.load_state_dict(ckpt["model_state_dict"])
         self.model.eval()
 
-        self.obs_norm = Normalizer(loc=ckpt["state_mean"], scale=ckpt["state_std"])
+        # self.obs_norm = Normalizer(loc=ckpt["state_mean"], scale=ckpt["state_std"])
+        assert "obs_norm" in ckpt
+        self.obs_norm = Normalizer.from_state_dict(ckpt["obs_norm"])
 
     def set_gym_env(self, gym_env):
         if self.conditioning != "phase-active":
@@ -140,9 +142,10 @@ class DPFMModelPolicy(ModelPolicy):
         self.execute_steps = max(1, min(self.execute_steps, self.pred_horizon))
         self.stochastic = stochastic
 
-        if "obs_norm" in checkpoint:
-            self.obs_norm = Normalizer.from_state_dict(checkpoint["obs_norm"])
-            self.action_norm = Normalizer.from_state_dict(checkpoint["action_norm"])
+        assert "obs_norm" in checkpoint
+        self.obs_norm = Normalizer.from_state_dict(checkpoint["obs_norm"])
+        assert "action_norm" in checkpoint
+        self.action_norm = Normalizer.from_state_dict(checkpoint["action_norm"])
 
         self.model = FlowMatchingPolicy(
             state_dim=self.state_dim,
@@ -218,9 +221,11 @@ class ResidualRLPolicy(ModelPolicy):
         rrl_cfg.action_dim = self.action_dim
 
         rl_checkpoint = torch.load(rl_model_path, map_location=self.device, weights_only=True)
-        if "obs_norm" in checkpoint:
-            self.obs_norm = Normalizer.from_state_dict(checkpoint["obs_norm"])
-            self.action_norm = Normalizer.from_state_dict(checkpoint["action_norm"])
+        # if "obs_norm" in checkpoint:
+        assert "obs_norm" in checkpoint
+        self.obs_norm = Normalizer.from_state_dict(checkpoint["obs_norm"])
+        assert "action_norm" in checkpoint
+        self.action_norm = Normalizer.from_state_dict(checkpoint["action_norm"])
 
         self.rrl_model = TD3Agent(rrl_cfg)
         self.rrl_model.load_state_dict(rl_checkpoint["model_state_dict"])

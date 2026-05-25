@@ -32,8 +32,8 @@ from torch import distributions as pyd
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_SCALE_OBSERVATIONS = 1e-3
-DEFAULT_SCALE_ACTIONS = 1e-1
+DEFAULT_SCALE_OBSERVATIONS = 1e-6 #1e-3
+DEFAULT_SCALE_ACTIONS = 1e-6 #1e-2
 
 class Normalizer:
     """Per-dimension z-score normalizer that works with both numpy and torch.
@@ -47,7 +47,7 @@ class Normalizer:
 
     # Floor for scale values.  Any dimension whose standard deviation is below
     # this threshold is treated as constant; its normalized output will be ~0.
-    EPS = 1e-1
+    EPS = 1e-6 # 1e-1
 
     def __init__(
         self,
@@ -169,7 +169,12 @@ class Normalizer:
 
     @classmethod
     def from_state_dict(cls, d: dict) -> Normalizer:
-        """Reconstruct a Normalizer from a checkpoint state dict."""
+        """Reconstruct a Normalizer from a checkpoint state dict.
+
+        Uses a small default_scale (1e-6) to preserve the exact scale values
+        that were stored at training time, avoiding re-clamping with the
+        current class-level EPS which may differ.
+        """
         return cls(
             loc=d["loc"].cpu().numpy(),
             scale=d["scale"].cpu().numpy(),

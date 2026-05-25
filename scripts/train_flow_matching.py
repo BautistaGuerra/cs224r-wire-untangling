@@ -36,13 +36,14 @@ def make_action_bounds(config: dict) -> tuple[np.ndarray, np.ndarray]:
         raw_env.close()
 
 
-def train(config: dict, demos_path: str, seed: int = 42, use_wandb: bool = True, checkpoint_dir: str = "checkpoints"):
+def train(config: dict, demos_path: str, seed: int = None, use_wandb: bool = True, checkpoint_dir: str = "checkpoints"):
     dpfm_cfg = config.get("dpfm", {})
     train_cfg = config.get("dpfm_train", {})
 
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
+    if seed is not None:
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     batch_size = int(train_cfg.get("batch_size", 2048))
@@ -241,8 +242,8 @@ def main():
 
     cfg = load_config(args.env_config, args.dpfm_config)
 
-    seed = args.seed if args.seed is not None else cfg.get("training", {}).get("seed", 42)
-    train(cfg, demos_path=args.demos_path, seed=seed, use_wandb=not args.no_wandb, checkpoint_dir=args.checkpoint_dir)
+    # seed = args.seed if args.seed is not None else cfg.get("training", {}).get("seed", 42)
+    train(cfg, demos_path=args.demos_path, seed=args.seed, use_wandb=not args.no_wandb, checkpoint_dir=args.checkpoint_dir)
 
 
 if __name__ == "__main__":
