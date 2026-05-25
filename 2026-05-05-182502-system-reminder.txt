@@ -1,0 +1,1762 @@
+ ▐▛███▜▌   Claude Code v2.1.126
+▝▜█████▛▘  Opus 4.7 · Claude Pro
+  ▘▘ ▝▝    ~/…/cs224r/final_project/source/cs224r-wire-untangling
+
+✻ Conversation compacted (ctrl+o for history)
+
+
+⏺ Try rendering with a few different seeds to see the new layout (sticks in
+  y-row at start, 8cm goal spacing):
+
+  .venv/bin/mjpython scripts/play_oracle.py --seed 2     # was succeeding before
+  .venv/bin/mjpython scripts/play_oracle.py --seed 0     # was failing
+  .venv/bin/mjpython scripts/play_oracle.py --seed 4     # mixed
+
+  What you should see now:
+  - Initial layout: 3 sticks in a row stretching left-right (along y) at slot
+  centers y≈-0.20, 0, 0.20. Each in its own y-slot, with random yaw and small x
+  jitter.
+  - Goal layout: tighter row at y=-0.08, 0, 0.08, all aligned with x-axis.
+  - Pick order (fixed): leftmost (red) → goal 0; middle (blue) → goal 1;
+  rightmost (green) → goal 2.
+
+  After you've watched a few, let me know:
+  1. Does the layout match your wire-feed mental model now?
+  2. Where does it still fail visually? (gripper bumping, stick rotating in
+  gripper, missed grasp, etc.)
+  3. Any specific seed where the failure is clean and reproducible?
+
+  Meanwhile I'll keep iterating to push the success rate up.
+
+✻ Baked for 3m 39s
+
+※ recap: Goal: build a Phase-1 oracle that collects 200 successful pick-and-place demos for the stick-reorder env. Currently the oracle hits 5/10 success after geometry and spacing fixes. Next: render seeds 0/2/4 to confirm the new layout and identify the remaining failure mode.
+
+❯ /compact                                                                      
+  ⎿  Compacted (ctrl+o to see full summary)
+  ⎿  Referenced file wire_untangling/demos/oracle.py
+  ⎿  Read wire_untangling/envs/stick_reorder.py (284 lines)
+  ⎿  Read configs/stick_reorder.yaml (27 lines)
+  ⎿  Read tests/test_env_readiness.py (182 lines)
+  ⎿  Read scripts/collect_demos.py (299 lines)
+  ⎿  Plan file referenced (~/.claude/plans/2-ok-that-was-magical-gem.md)
+
+❯ ok updates:                                                                   
+    a teammate has pushed some changes to main, they are mainly about a policy  
+  for only one stick.                                                           
+    what i need now: will start with one stick problem. i.e. collecting         
+  scripted demos for only one stick problem and then doing BC on one stick      
+  problem. the end                                                              
+    goal will be the same: three sticks, with three phases moving and placing   
+  correctly the three sticks, but we want to start simple and then iterate.     
+  first, idk exactly what have done my teammate on main branch. so go to pull   
+  it and see it, we will probably now have to do a combination of this two      
+  approaches.                                                                   
+
+⏺ Bash(git status)
+  ⎿  On branch feature/phase1-env-demo-collection
+     Changes not staged for commit:
+       (use "git add <file>..." to update what will be committed)
+     … +18 lines (ctrl+o to expand)
+
+⏺ Bash(git branch -a && git log --oneline -20)
+  ⎿  * feature/phase1-env-demo-collection
+       main
+       remotes/origin/main
+     … +16 lines (ctrl+o to expand)
+
+⏺ Bash(git fetch origin && git log --oneline origin/main -20)
+  ⎿  From github.com:BautistaGuerra/cs224r-wire-untangling
+      * [new branch]      feature/video-recording -> origin/feature/video-r
+     ecording
+     … +17 lines (ctrl+o to expand)
+
+⏺ Bash(git log --stat origin/main ^main)
+  ⎿  commit 0056be828d31a41099345da431c3eacbf8a62b37
+     Author: “Alex <alextarvo@gmail.com>
+     Date:   Wed Apr 29 18:42:59 2026 -0700
+     … +26 lines (ctrl+o to expand)
+
+⏺ Bash(git stash push -u -m "phase1-env-demo-collection-wip" && git stash list)
+  ⎿  Saved working directory and index state On feature/phase1-env-demo-col
+     lection: phase1-env-demo-collection-wip
+     stash@{0}: On feature/phase1-env-demo-collection: phase1-env-demo-coll
+     ection-wip
+
+⏺ Bash(git checkout main && git pull origin main && git log --oneline -5)
+  ⎿  Switched to branch 'main'
+     Your branch is behind 'origin/main' by 4 commits, and can be fast-forw
+     arded.
+     … +25 lines (ctrl+o to expand)
+
+⏺ Pulled. Let me read Alex's contributions in detail.
+
+  Read 5 files (ctrl+o to expand)
+  ⎿  Loaded CLAUDE.md
+
+⏺ Done pulling. Here's what's now on main and how it compares to my stashed
+  Phase 1 work:
+
+  Alex's contribution (single-stick, on main)
+
+  File: wire_untangling/policies/pick_place_expert.py
+  What it does: PickPlaceExpertPolicy — 8-phase FSM (APPROACH → DESCEND → GRASP
+  →
+    LIFT → TRANSPORT → PLACE → RELEASE → RETREAT), proportional control, SB3
+    .predict() API. Yaw aligns eef_yaw → stick_yaw (mod π) with yaw_gain=3.0.
+  ────────────────────────────────────────
+  File: scripts/collect_demos.py
+  What it does: Forces num_sticks=1. Saves successful episodes to HDF5 with
+    obs/actions/rewards/dones/next_obs per demo.
+  ────────────────────────────────────────
+  File: scripts/play_env.py
+  What it does: New --expert mode for visual + headless success-rate eval.
+  ────────────────────────────────────────
+  File: wire_untangling/envs/stick_reorder.py
+  What it does: Only comments added — no semantic change. Position-only success,
+
+    no orientation.
+  ────────────────────────────────────────
+  File: docs/expert_policy.md, CLAUDE.md, environment.yml
+  What it does: Docs + conda env.
+
+  He reports ~92% success on N=1, runs at lift_height=0.95, single-stick only.
+
+  What my stashed branch adds on top
+
+  - Orientation in _check_success (yaw mod π, 10° tol) + dense reward −λ_rot · 
+  yaw_err
+  - 8-way Phase IntEnum recorded in HDF5 (enables Andrew's phase-conditional
+  analysis)
+  - env_config_hash (SHA256-12) in HDF5 root attrs for reproducibility
+  - --smoke mode (50 clean rollouts, ≥95% threshold)
+  - Test battery: test_env_readiness.py (8 tests), test_oracle.py,
+  test_dataset.py
+  - N=3 multi-stick oracle (slot-based init, fixed/shortest ordering, OU noise)
+  - wire_untangling/utils/transform.py — shared yaw helpers
+
+  One real disagreement worth flagging
+
+  Alex's _compute_goal_positions uses table_offset[2] + table_full_size[2]/2 + 
+  stick_radius + 0.001 (treats table_offset as center). My stashed version
+  dropped + table_full_size[2]/2 (treated it as top). Alex's works at 92% so
+  empirically his z-frame is self-consistent. I should not contradict that —
+  keep his convention.
+
+  Recommended merge strategy (single-stick first)
+
+  Goal: keep Alex's proven N=1 expert and HDF5 collector unchanged for the BC
+  starting point, but layer in just the bits needed downstream so we don't have
+  to re-collect:
+
+  1. Keep Alex's expert as-is for N=1 BC. Don't touch his yaw convention.
+  2. Add phase labels to his HDF5 collector — record phase: (T,) int8 and
+  is_success: (T,) bool per step (his policy already has self._phase; just
+  expose it). Without this, Andrew's analysis can't run on these demos.
+  3. Add orientation to env's _check_success + dense reward (core proposal
+  commitment), but default orientation_threshold permissively (e.g. 30°) so
+  Alex's 92% doesn't tank — tighten later.
+  4. Defer: my N=3 oracle, slot-based init, OU noise, smoke mode,
+  env_config_hash, full test battery — re-introduce when we extend to N=3.
+  5. Drop the WIP stash for now (or cherry-pick transform.py only). Re-create
+  the rest later on top of Alex's foundation.
+
+  Three concrete questions before I code:
+
+  1. Single stick first, then extend to three — confirmed?
+  2. Add orientation now or later? I'd vote now with permissive 30° threshold so
+   existing demos remain valid; tighten when extending to N=3.
+  3. Add phase labels + is_success to Alex's HDF5 now? Cheap; unlocks downstream
+   analysis.
+
+  Tell me which of these to do and I'll execute. The stash is safe (stash@{0}: 
+  phase1-env-demo-collection-wip).
+
+✻ Cooked for 1m 49s
+
+❯ 1. "Keep Alex's expert as-is for N=1 BC. Don't touch his yaw convention.",    
+  what do u mean about his yaw convention? i believe he is not including        
+  yaw/orientation at all in the problem, we should include it.                  
+  2. yes,                                                                       
+  3. orientation_threshold 30 degree is not too permissively? i know that this  
+  will probably affect Alex succeess rate but orientation/yaw is something      
+  critical also in the 1 stick problem.                                         
+  4. if there is something that applies also to the 1 stick problem and it is   
+  worth it should be added.                                                     
+  5. make the changes as you wish, but make sure not to loose important info or 
+   detail by discarding                                                         
+
+⏺ Let me clarify my "yaw convention" wording first, then plan the merge.
+
+  On Alex's yaw: he aligns eef_yaw → stick_yaw during APPROACH/DESCEND so the
+  gripper fingers close perpendicular to the stick's long axis. That's a
+  pre-grasp alignment for the physical grip — not a goal-orientation
+  enforcement. After grasp, he never re-rotates, so the stick is placed at
+  whatever yaw it was grasped at. You're right: he is not enforcing orientation
+  at the goal at all. That's exactly what we need to add.
+
+  So my recommendation, with your answers folded in:
+
+  1. Keep Alex's grasp-yaw alignment as-is (the eef_yaw → stick_yaw driving
+  during APPROACH/DESCEND — works at 92%, don't break it).
+  2. Add goal-yaw alignment to TRANSPORT/PLACE: while transporting, rotate
+  gripper toward goal_yaw=0 (mod π). Since gripper rigidly holds the stick, eef
+  rotation = stick rotation. Block PLACE descent until yaw is within tolerance.
+  3. Env orientation tolerance: 10° as you asked. The env's _check_success and
+  dense reward both include yaw.
+  4. HDF5 enriched: keep Alex's existing fields, add per-step phase (int8,
+  8-way) and is_success (bool); add env_config_hash to root attrs.
+  5. Smoke mode in collect_demos.py.
+  6. Tests: env-readiness battery, expert tests, dataset tests — adapted to N=1.
+
+  Let me create the branch and start. The stash stays around so we can later
+  cherry-pick anything for N=3.
+
+⏺ Bash(git checkout -b feature/phase1-n1-orientation-bc && ls
+      wire_untangling/utils/ 2>/dev/null && cat requirements.txt)
+  ⎿  Switched to a new branch 'feature/phase1-n1-orientation-bc'
+     __init__.py
+     __pycache__
+     … +16 lines (ctrl+o to expand)
+
+  Read 1 file (ctrl+o to expand)
+⏺ Now create the shared yaw helpers.
+
+⏺ Write(wire_untangling/utils/transform.py)
+  ⎿  Wrote 34 lines to wire_untangling/utils/transform.py
+      2 Quaternion / yaw helpers shared by the env and the expert policy.
+      3 
+      4 The stick is rotationally symmetric about its long axis, so yaw_e
+        rror_mod_pi
+      5 treats yaw and yaw+pi as equivalent and returns a value in [0, pi
+        /2].
+      6 """
+      7 
+      8 import numpy as np
+      9 
+     … +33 lines (ctrl+o to expand)
+
+⏺ Now the env edits.
+
+⏺ Update(wire_untangling/envs/stick_reorder.py)
+  ⎿  Added 7 lines, removed 3 lines
+      38      End-effector delta pose (dx, dy, dz, droll, dpitch, dyaw) +
+           gripper open/close.
+      39  
+      40  Reward:
+      41 -    Dense (reward_shaping=True):  -sum of distances from stick 
+         -centers to goal centers                                        
+      42 -    Sparse bonus:                 +1.0 when all sticks within s
+         -uccess_threshold                                               
+      43 -    Note: only position is checked — orientation is ignored.   
+      41 +    Dense (reward_shaping=True):  -sum_i (dist_i + lambda_rot *
+         + yaw_err_i)                                                    
+      42 +    Sparse bonus:                 +1.0 when every stick is with
+         +in success_threshold                                           
+      43 +                                  AND yaw_err <= orientation_th
+         +reshold.                                                       
+      44 +                                                               
+      45 +    Yaw error is reduced mod π (the stick is rotationally symme
+         +tric about its                                                 
+      46 +    long axis, so yaw and yaw+π are equivalent).               
+      47  """
+      48  
+      49  import numpy as np
+     ...
+      56  from robosuite.utils.transform_utils import convert_quat
+      57  
+      58  from wire_untangling.models.objects import StickObject
+      59 +from wire_untangling.utils.transform import yaw_from_quat_wxyz,
+         + yaw_error_mod_pi                                              
+      60  
+      61  
+      62  class StickReorderEnv(ManipulationEnv):
+
+⏺ Update(wire_untangling/envs/stick_reorder.py)
+  ⎿  Added 11 lines
+      70          stick_radius: Stick cross-section half-extent in metres
+          .
+      71          goal_spacing: Y-axis spacing between goal positions in 
+          metres.
+      72          success_threshold: Per-stick distance tolerance for tas
+          k success (m).
+      73 +        orientation_threshold: Per-stick yaw tolerance for task
+         + success (rad).                                                
+      74 +            Yaw is reduced mod π (stick has 180° symmetry).    
+      75 +        lambda_rot: Weight of the yaw-error term in the dense r
+         +eward.                                                         
+      76 +        goal_yaw: Target yaw for every stick at its goal (rad).
+         + Default 0                                                     
+      77 +            aligns sticks with the world x-axis.               
+      78          reward_shaping: If True, add dense shaped reward on top
+           of sparse bonus.
+      79          table_full_size: (x, y, z) full size of the table surfa
+          ce.
+      80          table_friction: MuJoCo friction parameters for the tabl
+          e.
+     ...
+      89          stick_radius: float = 0.012,
+      90          goal_spacing: float = 0.06,
+      91          success_threshold: float = 0.03,
+      92 +        orientation_threshold: float = np.deg2rad(10.0),       
+      93 +        lambda_rot: float = 0.1,                               
+      94 +        goal_yaw: float = 0.0,                                 
+      95          reward_shaping: bool = True,
+      96          table_full_size=(0.8, 0.8, 0.05),
+      97          table_friction=(1.0, 0.005, 0.0001),
+     ...
+      102          self.stick_radius = stick_radius
+      103          self.goal_spacing = goal_spacing
+      104          self.success_threshold = success_threshold
+      105 +        self.orientation_threshold = orientation_threshold    
+      106 +        self.lambda_rot = lambda_rot                          
+      107 +        self.goal_yaw = goal_yaw                              
+      108          self.reward_shaping = reward_shaping
+      109          self.reward_scale = 1.0   # required by GymWrapper
+      110          self.use_object_obs = True  # always include stick pos
+           itions in obs
+
+⏺ Update(wire_untangling/envs/stick_reorder.py)
+  ⎿  Added 15 lines, removed 5 lines
+      265  
+      266      # ── Reward and success ──────────────────────────────────
+           ───────────
+      267  
+      268 +    def _yaw_error(self, body_id: int) -> float:              
+      269 +        """Yaw error for a stick body, reduced to [0, π/2] by 
+          +stick symmetry."""                                            
+      270 +        q = self.sim.data.body_xquat[body_id]  # wxyz (MuJoCo)
+      271 +        yaw = yaw_from_quat_wxyz(q)                           
+      272 +        return yaw_error_mod_pi(yaw, self.goal_yaw)           
+      273 +                                                              
+      274      def reward(self, action=None) -> float:
+      275          """Compute reward for current state.
+      270 -        Dense: negative sum of Euclidean distances from each s
+          -tick center to its goal.                                      
+      271 -        Sparse: +1.0 bonus when all sticks are within success_
+          -threshold of goals."""                                        
+      276 +        Dense: -sum_i (dist_i + lambda_rot * yaw_err_i).      
+      277 +        Sparse: +1.0 bonus when all sticks are within success_
+          +threshold of goals                                            
+      278 +        AND yaw_err <= orientation_threshold."""              
+      279          reward = 0.0
+      280  
+      281          if self.reward_shaping:
+      282              for i, body_id in enumerate(self.stick_body_ids):
+      283                  pos = self.sim.data.body_xpos[body_id]
+      284                  dist = np.linalg.norm(pos - self._goal_positio
+           ns[i])
+      278 -                reward -= dist                                
+      285 +                yaw_err = self._yaw_error(body_id)            
+      286 +                reward -= dist + self.lambda_rot * yaw_err    
+      287  
+      288          if self._check_success():
+      289              reward += 1.0
+     ...
+      297          return reward, done, info
+      298  
+      299      def _check_success(self) -> bool:
+      292 -        """All sticks must be within success_threshold of thei
+          -r goal positions.                                             
+      293 -        Only checks position (Euclidean distance) — orientatio
+          -n is ignored."""                                              
+      300 +        """All sticks must be within success_threshold of thei
+          +r goal positions                                              
+      301 +        AND within orientation_threshold of goal_yaw (mod π)."
+          +""                                                            
+      302          for i, body_id in enumerate(self.stick_body_ids):
+      303              pos = self.sim.data.body_xpos[body_id]
+      304              if np.linalg.norm(pos - self._goal_positions[i]) >
+            self.success_threshold:
+      305                  return False
+      306 +            if self._yaw_error(body_id) > self.orientation_thr
+          +eshold:                                                       
+      307 +                return False                                  
+      308          return True
+
+⏺ Update(configs/stick_reorder.yaml)
+  ⎿  Error editing file
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Update(configs/stick_reorder.yaml)
+  ⎿  Added 3 lines
+       5    stick_radius: 0.012
+       6    goal_spacing: 0.06
+       7    success_threshold: 0.03
+       8 +  orientation_threshold: 0.1745   # ~10 degrees in radians, mod
+         +-π yaw error                                                   
+       9 +  lambda_rot: 0.1                 # weight on yaw term in dense
+         + reward                                                        
+      10 +  goal_yaw: 0.0                   # all sticks aligned with wor
+         +ld x-axis                                                      
+      11    reward_shaping: true
+      12  
+      13  training:
+⏺ Now extend the expert. I'll preserve Alex's grasp-time alignment and add
+  goal-yaw rotation during TRANSPORT/PLACE.
+
+⏺ Update(wire_untangling/policies/pick_place_expert.py)
+  ⎿  Added 20 lines, removed 10 lines
+      11  the gripper yaw must be aligned with the stick's heading so the
+           fingers close
+      12  perpendicular to the stick's long axis.
+      13  
+      14 +Two yaw alignments happen at different phases:                 
+      15 +    1. APPROACH/DESCEND — eef_yaw is driven toward stick_yaw (m
+         +od π) so the                                                   
+      16 +       fingers can close around the stick.                     
+      17 +    2. TRANSPORT/PLACE — once the stick is gripped, eef rotatio
+         +n rotates the                                                  
+      18 +       stick rigidly, so eef_yaw is driven so that stick_yaw re
+         +aches goal_yaw                                                 
+      19 +       (mod π). PLACE descent is blocked until yaw is within to
+         +lerance.                                                       
+      20 +                                                               
+      21  Exposes .predict(obs, deterministic=True) -> (action, None) for
+           SB3 compatibility.
+      22 +The current Phase is published as `policy.phase` so the demo co
+         +llector can                                                    
+      23 +record an integer label per timestep alongside the observation.
+      24  """
+      25  
+      26  from collections import OrderedDict
+      18 -from enum import Enum, auto                                    
+      27 +from enum import IntEnum                                       
+      28  
+      29  import numpy as np
+      30  
+      31  
+      23 -class Phase(Enum):                                             
+      24 -    APPROACH = auto()                                          
+      25 -    DESCEND = auto()                                           
+      26 -    GRASP = auto()                                             
+      27 -    LIFT = auto()                                              
+      28 -    TRANSPORT = auto()                                         
+      29 -    PLACE = auto()                                             
+      30 -    RELEASE = auto()                                           
+      31 -    RETREAT = auto()                                           
+      32 +# IntEnum so phase labels can be stored directly in HDF5 as int
+         +8.                                                             
+      33 +class Phase(IntEnum):                                          
+      34 +    APPROACH = 0                                               
+      35 +    DESCEND = 1                                                
+      36 +    GRASP = 2                                                  
+      37 +    LIFT = 3                                                   
+      38 +    TRANSPORT = 4                                              
+      39 +    PLACE = 5                                                  
+      40 +    RELEASE = 6                                                
+      41 +    RETREAT = 7                                                
+      42  
+      43  
+      44  GRIPPER_OPEN = -1.0
+
+⏺ Update(wire_untangling/policies/pick_place_expert.py)
+  ⎿  Added 18 lines, removed 3 lines
+      116          eef_z_offset: Vertical offset from stick center to EEF
+            target during grasp.
+      117          pos_threshold: XY distance threshold for phase transit
+           ions (metres).
+      118          z_threshold: Z distance threshold for phase transition
+           s (metres).
+      119 -        yaw_threshold: Yaw alignment threshold for APPROACH→DE
+          -SCEND transition (rad).                                       
+      119 +        grasp_yaw_threshold: Yaw alignment threshold for APPRO
+          +ACH→DESCEND (rad).                                            
+      120 +        place_yaw_threshold: Yaw alignment threshold for TRANS
+          +PORT→PLACE (rad).                                             
+      121 +            Should be tighter than the env's orientation_thres
+          +hold so the                                                   
+      122 +            stick lands within tolerance after a small drift d
+          +uring descent.                                                
+      123 +        goal_yaw: Target yaw for the stick at the goal (rad), 
+          +default 0.                                                    
+      124 +            Stick has 180° symmetry, so yaw is driven mod π.  
+      125          grasp_steps: Steps to hold gripper closed before lifti
+           ng.
+      126          release_steps: Steps to hold gripper open after placin
+           g.
+      127          gain: Proportional gain for position deltas.
+     ...
+      135          eef_z_offset: float = 0.0,
+      136          pos_threshold: float = 0.02,
+      137          z_threshold: float = 0.02,
+      133 -        yaw_threshold: float = 0.15,                          
+      138 +        grasp_yaw_threshold: float = 0.15,                    
+      139 +        place_yaw_threshold: float = 0.05,                    
+      140 +        goal_yaw: float = 0.0,                                
+      141          grasp_steps: int = 25,
+      142          release_steps: int = 10,
+      143          gain: float = 10.0,
+     ...
+      148          self.eef_z_offset = eef_z_offset
+      149          self.pos_threshold = pos_threshold
+      150          self.z_threshold = z_threshold
+      144 -        self.yaw_threshold = yaw_threshold                    
+      151 +        self.grasp_yaw_threshold = grasp_yaw_threshold        
+      152 +        self.place_yaw_threshold = place_yaw_threshold        
+      153 +        self.goal_yaw = goal_yaw                              
+      154          self.grasp_steps = grasp_steps
+      155          self.release_steps = release_steps
+      156          self.gain = gain
+     ...
+      159          self._phase = Phase.APPROACH
+      160          self._phase_step = 0
+      161  
+      162 +    @property                                                 
+      163 +    def phase(self) -> Phase:                                 
+      164 +        """Current phase of the FSM (read-only). Used by the d
+          +emo collector                                                 
+      165 +        to label each transition with its source phase."""    
+      166 +        return self._phase                                    
+      167 +                                                              
+      168      def reset(self):
+      169          """Reset internal state at the start of each episode."
+           ""
+      170          self._phase = Phase.APPROACH
+
+⏺ Now update predict and _step_phase to drive stick_yaw → goal_yaw during
+  TRANSPORT/PLACE.
+
+⏺ Update(wire_untangling/policies/pick_place_expert.py)
+  ⎿  Added 28 lines, removed 14 lines
+      190          grasp_z = stick_pos[2] + self.eef_z_offset
+      191          place_z = goal_pos[2] + self.eef_z_offset
+      192  
+      193 -        # Compute yaw alignment: target EEF yaw = stick yaw (m
+          -od pi)                                                        
+      194 -        # so gripper fingers close perpendicular to the stick'
+          -s long axis                                                   
+      193 +        # Pre-grasp yaw alignment: drive eef_yaw → stick_yaw (
+          +mod π) so the                                                 
+      194 +        # fingers close perpendicular to the stick's long axis
+          +.                                                             
+      195          stick_yaw = _quat_to_yaw(stick_quat)
+      196          eef_yaw = _quat_to_yaw(eef_quat)
+      197 -        yaw_error = _wrap_angle(stick_yaw - eef_yaw)          
+      198 -        # Stick has 180° symmetry — take the shorter rotation 
+      199 -        if yaw_error > np.pi / 2:                             
+      200 -            yaw_error -= np.pi                                
+      201 -        elif yaw_error < -np.pi / 2:                          
+      202 -            yaw_error += np.pi                                
+      197 +        grasp_yaw_error = _wrap_to_half_pi(stick_yaw - eef_yaw
+          +)                                                             
+      198  
+      204 -        action = self._step_phase(eef_pos, stick_pos, goal_pos
+          -, grasp_z, place_z, yaw_error)                                
+      199 +        # Goal yaw alignment: once the stick is in the gripper
+          +, eef rotation                                                
+      200 +        # rotates the stick rigidly. We drive Δyaw to make sti
+          +ck_yaw → goal_yaw                                             
+      201 +        # using the *stick's* yaw as the feedback signal, so a
+          +ny residual                                                   
+      202 +        # eef-vs-stick offset from the imperfect grasp doesn't
+          + propagate.                                                   
+      203 +        place_yaw_error = _wrap_to_half_pi(self.goal_yaw - sti
+          +ck_yaw)                                                       
+      204 +                                                              
+      205 +        action = self._step_phase(                            
+      206 +            eef_pos, stick_pos, goal_pos, grasp_z, place_z,   
+      207 +            grasp_yaw_error, place_yaw_error,                 
+      208 +        )                                                     
+      209          return action, None
+      210  
+      207 -    def _step_phase(self, eef_pos, stick_pos, goal_pos, grasp_
+          -z, place_z, yaw_error):                                       
+      211 +    def _step_phase(                                          
+      212 +        self, eef_pos, stick_pos, goal_pos, grasp_z, place_z, 
+      213 +        grasp_yaw_error, place_yaw_error,                     
+      214 +    ):                                                        
+      215          """Execute current phase and handle transitions."""
+      216          phase = self._phase
+      217  
+     ...
+      219              target = np.array([stick_pos[0], stick_pos[1], sel
+           f.lift_height])
+      220              action = self._move_to(eef_pos, target, GRIPPER_OP
+           EN)
+      221              # Rotate gripper to align with stick while approac
+           hing
+      215 -            action[5] = np.clip(self.yaw_gain * yaw_error, -1.
+          -0, 1.0)                                                       
+      222 +            action[5] = np.clip(self.yaw_gain * grasp_yaw_erro
+          +r, -1.0, 1.0)                                                 
+      223              xy_dist = np.linalg.norm(eef_pos[:2] - stick_pos[:
+           2])
+      224              z_dist = abs(eef_pos[2] - self.lift_height)
+      218 -            yaw_aligned = abs(yaw_error) < self.yaw_threshold 
+      225 +            yaw_aligned = abs(grasp_yaw_error) < self.grasp_ya
+          +w_threshold                                                   
+      226              if xy_dist < self.pos_threshold and z_dist < self.
+           z_threshold and yaw_aligned:
+      227                  self._advance(Phase.DESCEND)
+      228  
+     ...
+      230              target = np.array([stick_pos[0], stick_pos[1], gra
+           sp_z])
+      231              action = self._move_to(eef_pos, target, GRIPPER_OP
+           EN)
+      232              # Maintain yaw alignment during descent
+      226 -            action[5] = np.clip(self.yaw_gain * yaw_error, -1.
+          -0, 1.0)                                                       
+      233 +            action[5] = np.clip(self.yaw_gain * grasp_yaw_erro
+          +r, -1.0, 1.0)                                                 
+      234              if abs(eef_pos[2] - grasp_z) < self.z_threshold:
+      235                  self._advance(Phase.GRASP)
+      236  
+     ...
+      249          elif phase == Phase.TRANSPORT:
+      250              target = np.array([goal_pos[0], goal_pos[1], self.
+           lift_height])
+      251              action = self._move_to(eef_pos, target, GRIPPER_CL
+           OSE)
+      252 +            # Rotate stick toward goal_yaw while transporting.
+      253 +            action[5] = np.clip(self.yaw_gain * place_yaw_erro
+          +r, -1.0, 1.0)                                                 
+      254              xy_dist = np.linalg.norm(eef_pos[:2] - goal_pos[:2
+           ])
+      246 -            if xy_dist < self.pos_threshold:                  
+      255 +            yaw_aligned = abs(place_yaw_error) < self.place_ya
+          +w_threshold                                                   
+      256 +            # Don't drop into PLACE until both xy AND yaw are 
+          +settled, so the                                               
+      257 +            # stick won't smear sideways or rotate while conta
+          +cting the table.                                              
+      258 +            if xy_dist < self.pos_threshold and yaw_aligned:  
+      259                  self._advance(Phase.PLACE)
+      260  
+      261          elif phase == Phase.PLACE:
+      262              # Use goal z, not current stick z (stick is in the
+            gripper)
+      263              target = np.array([goal_pos[0], goal_pos[1], place
+           _z])
+      264              action = self._move_to(eef_pos, target, GRIPPER_CL
+           OSE)
+      265 +            # Continue fine yaw correction during the descent.
+      266 +            action[5] = np.clip(self.yaw_gain * place_yaw_erro
+          +r, -1.0, 1.0)                                                 
+      267              if abs(eef_pos[2] - place_z) < self.z_threshold:
+      268                  self._advance(Phase.RELEASE)
+      269  
+
+⏺ Now add the _wrap_to_half_pi helper used in the rewrite (replaces the inline
+  mod-π logic):
+
+⏺ Update(wire_untangling/policies/pick_place_expert.py)
+  ⎿  Added 11 lines
+       93      return (angle + np.pi) % (2 * np.pi) - np.pi
+       94  
+       95  
+       96 +def _wrap_to_half_pi(angle):                                  
+       97 +    """Wrap angle to [-pi/2, pi/2] (stick has 180° symmetry, s
+          +o yaw and yaw+π                                               
+       98 +    are equivalent — we always pick the shorter rotation).""" 
+       99 +    a = _wrap_angle(angle)                                    
+      100 +    if a > np.pi / 2:                                         
+      101 +        a -= np.pi                                            
+      102 +    elif a < -np.pi / 2:                                      
+      103 +        a += np.pi                                            
+      104 +    return a                                                  
+      105 +                                                              
+      106 +                                                              
+      107  class PickPlaceExpertPolicy:
+      108      """Scripted waypoint-based pick-and-place policy for a sin
+           gle stick.
+      109  
+
+⏺ Now enrich the HDF5 collector with phase, is_success, env_config_hash, and a
+  --smoke mode.
+
+⏺ Write(scripts/collect_demos.py)
+  ⎿  Added 170 lines, removed 52 lines
+      2  Collect expert demonstrations for behavior cloning.
+      3  
+      4  Runs the scripted PickPlaceExpertPolicy, stores only successful 
+         episodes in HDF5.
+      5 +Per-step phase labels and success flags are recorded so downstre
+        +am analysis                                                     
+      6 +(e.g. phase-conditional BC, error attribution) can run without r
+        +e-rollout.                                                      
+      7  
+      8  HDF5 layout:
+      9      data/
+     ...
+       13              rewards    (T,)           float32
+       14              dones      (T,)           bool
+       15              next_obs   (T, obs_dim)   float32
+       16 +            phase      (T,)           int8       0..7  (Phase 
+          +IntEnum)                                                      
+       17 +            is_success (T,)           bool       env._check_su
+          +ccess per step                                                
+       18          demo_1/ ...
+       15 -    attrs: num_demos, env_config, obs_dim, total_samples      
+       19 +    attrs:                                                    
+       20 +        num_demos        int    — number of successful episode
+          +s                                                             
+       21 +        obs_dim          int    — observation dimensionality  
+       22 +        total_samples    int    — total transitions across all
+          + demos                                                        
+       23 +        env_config       str    — JSON of env kwargs          
+       24 +        env_config_hash  str    — SHA256-12 of env+robosuite v
+          +ersion (reproducibility)                                      
+       25 +        robosuite_version str   — robosuite package version us
+          +ed                                                            
+       26 +        oracle_version   str    — version tag of the expert po
+          +licy                                                          
+       27  
+       28  Usage:
+       29 +    # Collect 200 successful demos                            
+       30      python scripts/collect_demos.py --num-demos 200 --output d
+           ata/demos.hdf5
+       31 +                                                              
+       32 +    # Smoke test: 50 rollouts, no save, fail if success rate <
+          + 95%                                                          
+       33 +    python scripts/collect_demos.py --smoke                   
+       34 +                                                              
+       35 +    # With live rendering (debug, slow)                       
+       36      python scripts/collect_demos.py --num-demos 10 --output /t
+           mp/test.hdf5 --render
+       37  """
+       38  
+       39  import argparse
+       40 +import hashlib                                                
+       41  import json
+       42  import os
+       43 +import sys                                                    
+       44  
+       45  import h5py
+       46  import numpy as np
+       47  import yaml
+       48  
+       49  
+       50 +ORACLE_VERSION = "1.1-n1-orientation"                         
+       51 +                                                              
+       52 +                                                              
+       53 +def env_config_hash(env_kwargs: dict, robosuite_version: str) 
+          +-> str:                                                       
+       54 +    """SHA256-12 over the env config + robosuite version (cont
+          +roller is the                                                 
+       55 +    robosuite default OSC_POSE for this codebase, so it is imp
+          +licit)."""                                                    
+       56 +    payload = {                                               
+       57 +        "env_kwargs": env_kwargs,                             
+       58 +        "robosuite_version": robosuite_version,               
+       59 +    }                                                         
+       60 +    blob = json.dumps(payload, sort_keys=True, default=str).en
+          +code()                                                        
+       61 +    return hashlib.sha256(blob).hexdigest()[:12]              
+       62 +                                                              
+       63 +                                                              
+       64 +def make_env(env_cfg: dict, render: bool = False):            
+       65 +    from wire_untangling.envs import StickReorderEnv          
+       66 +                                                              
+       67 +    return StickReorderEnv(                                   
+       68 +        robots=env_cfg.get("robot", "Panda"),                 
+       69 +        num_sticks=env_cfg.get("num_sticks", 1),              
+       70 +        stick_length=env_cfg.get("stick_length", 0.18),       
+       71 +        stick_radius=env_cfg.get("stick_radius", 0.012),      
+       72 +        goal_spacing=env_cfg.get("goal_spacing", 0.06),       
+       73 +        success_threshold=env_cfg.get("success_threshold", 0.0
+          +3),                                                           
+       74 +        orientation_threshold=env_cfg.get("orientation_thresho
+          +ld", np.deg2rad(10.0)),                                       
+       75 +        lambda_rot=env_cfg.get("lambda_rot", 0.1),            
+       76 +        goal_yaw=env_cfg.get("goal_yaw", 0.0),                
+       77 +        reward_shaping=env_cfg.get("reward_shaping", True),   
+       78 +        has_renderer=render,                                  
+       79 +        has_offscreen_renderer=False,                         
+       80 +        use_camera_obs=False,                                 
+       81 +        control_freq=20,                                      
+       82 +        horizon=env_cfg.get("horizon", 500),                  
+       83 +    )                                                         
+       84 +                                                              
+       85 +                                                              
+       86 +def run_episode(gym_env, expert, render: bool = False):       
+       87 +    """Run one expert rollout. Returns per-step lists and fina
+          +l success."""                                                 
+       88 +    obs, _ = gym_env.reset()                                  
+       89 +    expert.reset()                                            
+       90 +                                                              
+       91 +    ep_obs, ep_actions, ep_rewards, ep_dones = [], [], [], [] 
+       92 +    ep_next_obs, ep_phase, ep_success = [], [], []            
+       93 +    done = False                                              
+       94 +    info: dict = {}                                           
+       95 +                                                              
+       96 +    while not done:                                           
+       97 +        # Capture phase BEFORE the action — labels the action 
+          +with the phase                                                
+       98 +        # that produced it, matching the convention of action-
+          +time labels.                                                  
+       99 +        phase_before = int(expert.phase)                      
+      100 +        action, _ = expert.predict(obs)                       
+      101 +        next_obs, reward, terminated, truncated, info = gym_en
+          +v.step(action)                                                
+      102 +        done = terminated or truncated                        
+      103 +                                                              
+      104 +        ep_obs.append(obs)                                    
+      105 +        ep_actions.append(action)                             
+      106 +        ep_rewards.append(reward)                             
+      107 +        ep_dones.append(done)                                 
+      108 +        ep_next_obs.append(next_obs)                          
+      109 +        ep_phase.append(phase_before)                         
+      110 +        ep_success.append(bool(info.get("is_success", False)))
+      111 +                                                              
+      112 +        obs = next_obs                                        
+      113 +                                                              
+      114 +        if render:                                            
+      115 +            gym_env.env.render()                              
+      116 +                                                              
+      117 +    final_success = bool(info.get("is_success", False))       
+      118 +    return {                                                  
+      119 +        "obs": np.array(ep_obs, dtype=np.float32),            
+      120 +        "actions": np.array(ep_actions, dtype=np.float32),    
+      121 +        "rewards": np.array(ep_rewards, dtype=np.float32),    
+      122 +        "dones": np.array(ep_dones, dtype=bool),              
+      123 +        "next_obs": np.array(ep_next_obs, dtype=np.float32),  
+      124 +        "phase": np.array(ep_phase, dtype=np.int8),           
+      125 +        "is_success": np.array(ep_success, dtype=bool),       
+      126 +        "final_success": final_success,                       
+      127 +        "final_phase": int(expert.phase),                     
+      128 +    }                                                         
+      129 +                                                              
+      130 +                                                              
+      131 +def smoke_test(env_cfg: dict, n_rollouts: int, threshold: floa
+          +t):                                                           
+      132 +    """Run n_rollouts headless and report success rate. Exit 1
+          + if below threshold."""                                       
+      133 +    from robosuite.wrappers import GymWrapper                 
+      134 +                                                              
+      135 +    from wire_untangling.policies import PickPlaceExpertPolicy
+          +, build_obs_index_map                                         
+      136 +    from wire_untangling.policies.pick_place_expert import Pha
+          +se                                                            
+      137 +                                                              
+      138 +    raw_env = make_env(env_cfg, render=False)                 
+      139 +    gym_env = GymWrapper(raw_env)                             
+      140 +    obs_map = build_obs_index_map(gym_env)                    
+      141 +    expert = PickPlaceExpertPolicy(obs_map, goal_yaw=env_cfg.g
+          +et("goal_yaw", 0.0))                                          
+      142 +                                                              
+      143 +    successes = 0                                             
+      144 +    failure_phases: dict[int, int] = {}                       
+      145 +                                                              
+      146 +    for i in range(n_rollouts):                               
+      147 +        ep = run_episode(gym_env, expert)                     
+      148 +        if ep["final_success"]:                               
+      149 +            successes += 1                                    
+      150 +        else:                                                 
+      151 +            failure_phases[ep["final_phase"]] = failure_phases
+          +.get(ep["final_phase"], 0) + 1                                
+      152 +        print(f"  rollout {i + 1}/{n_rollouts}: success={ep['f
+          +inal_success']} "                                             
+      153 +              f"final_phase={Phase(ep['final_phase']).name}") 
+      154 +                                                              
+      155 +    gym_env.close()                                           
+      156 +    rate = successes / n_rollouts                             
+      157 +    print(f"\nSmoke test: {successes}/{n_rollouts} succeeded (
+          +{rate:.1%})")                                                 
+      158 +    if failure_phases:                                        
+      159 +        print("Per-phase failure counts (phase at terminal ste
+          +p):")                                                         
+      160 +        for p, c in sorted(failure_phases.items()):           
+      161 +            print(f"  {Phase(p).name}: {c}")                  
+      162 +                                                              
+      163 +    if rate < threshold:                                      
+      164 +        print(f"FAIL: success rate {rate:.1%} < {threshold:.0%
+          +} threshold")                                                 
+      165 +        sys.exit(1)                                           
+      166 +    print("PASS")                                             
+      167 +                                                              
+      168 +                                                              
+      169  def collect(
+      170      config: dict,
+      171      num_demos: int,
+     ...
+      173      render: bool = False,
+      174      max_attempts_factor: int = 3,
+      175  ):
+      176 +    import robosuite                                          
+      177      from robosuite.wrappers import GymWrapper
+      178  
+       40 -    from wire_untangling.envs import StickReorderEnv          
+      179      from wire_untangling.policies import PickPlaceExpertPolicy
+           , build_obs_index_map
+      180  
+       43 -    env_cfg = config.get("env", {})                           
+       44 -    env_cfg["num_sticks"] = 1                                 
+      181 +    env_cfg = dict(config.get("env", {}))                     
+      182 +    env_cfg["num_sticks"] = 1  # single-stick BC for now      
+      183  
+       46 -    raw_env = StickReorderEnv(                                
+       47 -        robots=env_cfg.get("robot", "Panda"),                 
+       48 -        num_sticks=1,                                         
+       49 -        has_renderer=render,                                  
+       50 -        has_offscreen_renderer=False,                         
+       51 -        use_camera_obs=False,                                 
+       52 -        control_freq=20,                                      
+       53 -        horizon=500,                                          
+       54 -    )                                                         
+      184 +    raw_env = make_env(env_cfg, render=render)                
+      185      gym_env = GymWrapper(raw_env)
+       56 -                                                              
+      186      obs_map = build_obs_index_map(gym_env)
+       58 -    expert = PickPlaceExpertPolicy(obs_map)                   
+      187 +    expert = PickPlaceExpertPolicy(obs_map, goal_yaw=env_cfg.g
+          +et("goal_yaw", 0.0))                                          
+      188      obs_dim = gym_env.observation_space.shape[0]
+      189  
+      190 +    cfg_hash = env_config_hash(env_cfg, robosuite.__version__)
+      191 +                                                              
+      192      os.makedirs(os.path.dirname(output_path) or ".", exist_ok=
+           True)
+      193  
+      194      successful_demos = []
+     ...
+      197  
+      198      while len(successful_demos) < num_demos and attempts < max
+           _attempts:
+      199          attempts += 1
+       69 -        obs, _ = gym_env.reset()                              
+       70 -        expert.reset()                                        
+      200 +        ep = run_episode(gym_env, expert, render=render)      
+      201  
+       72 -        ep_obs, ep_actions, ep_rewards, ep_dones, ep_next_obs 
+          -= [], [], [], [], []                                          
+       73 -        done = False                                          
+       74 -                                                              
+       75 -        while not done:                                       
+       76 -            action, _ = expert.predict(obs)                   
+       77 -            next_obs, reward, terminated, truncated, info = gy
+          -m_env.step(action)                                            
+       78 -            done = terminated or truncated                    
+       79 -                                                              
+       80 -            ep_obs.append(obs)                                
+       81 -            ep_actions.append(action)                         
+       82 -            ep_rewards.append(reward)                         
+       83 -            ep_dones.append(done)                             
+       84 -            ep_next_obs.append(next_obs)                      
+       85 -                                                              
+       86 -            obs = next_obs                                    
+       87 -                                                              
+       88 -            if render:                                        
+       89 -                gym_env.env.render()                          
+       90 -                                                              
+       91 -        success = info.get("is_success", False)               
+       92 -        if success:                                           
+       93 -            successful_demos.append({                         
+       94 -                "obs": np.array(ep_obs, dtype=np.float32),    
+       95 -                "actions": np.array(ep_actions, dtype=np.float
+          -32),                                                          
+       96 -                "rewards": np.array(ep_rewards, dtype=np.float
+          -32),                                                          
+       97 -                "dones": np.array(ep_dones, dtype=bool),      
+       98 -                "next_obs": np.array(ep_next_obs, dtype=np.flo
+          -at32),                                                        
+       99 -            })                                                
+      202 +        if ep["final_success"]:                               
+      203 +            successful_demos.append(ep)                       
+      204              print(f"  Demo {len(successful_demos)}/{num_demos}
+            collected "
+      101 -                  f"(attempt {attempts}, {len(ep_obs)} steps)"
+          -)                                                             
+      205 +                  f"(attempt {attempts}, {len(ep['obs'])} step
+          +s)")                                                          
+      206          else:
+      103 -            print(f"  Attempt {attempts} failed (phase={expert
+          -._phase.name}, "                                              
+      104 -                  f"{len(ep_obs)} steps) — skipping")         
+      207 +            from wire_untangling.policies.pick_place_expert im
+          +port Phase                                                    
+      208 +            print(f"  Attempt {attempts} failed (final_phase={
+          +Phase(ep['final_phase']).name}, "                             
+      209 +                  f"{len(ep['obs'])} steps) — skipping")      
+      210  
+      211      gym_env.close()
+      212  
+     ...
+      214          print("No successful demos collected!")
+      215          return
+      216  
+      112 -    # Write HDF5                                              
+      217      total_samples = sum(d["obs"].shape[0] for d in successful_
+           demos)
+      218      with h5py.File(output_path, "w") as f:
+      219          data_grp = f.create_group("data")
+      220          for i, demo in enumerate(successful_demos):
+      221              grp = data_grp.create_group(f"demo_{i}")
+      118 -            for key, arr in demo.items():                     
+      119 -                grp.create_dataset(key, data=arr, compression=
+          -"gzip")                                                       
+      222 +            for key in ("obs", "actions", "rewards", "dones", 
+      223 +                        "next_obs", "phase", "is_success"):   
+      224 +                grp.create_dataset(key, data=demo[key], compre
+          +ssion="gzip")                                                 
+      225  
+      226          f.attrs["num_demos"] = len(successful_demos)
+      227          f.attrs["obs_dim"] = obs_dim
+      228          f.attrs["total_samples"] = total_samples
+      229          f.attrs["env_config"] = json.dumps(env_cfg)
+      230 +        f.attrs["env_config_hash"] = cfg_hash                 
+      231 +        f.attrs["robosuite_version"] = robosuite.__version__  
+      232 +        f.attrs["oracle_version"] = ORACLE_VERSION            
+      233  
+      234      print(f"\nSaved {len(successful_demos)} demos ({total_samp
+           les} total transitions) "
+      235            f"to {output_path}")
+      236 +    print(f"  env_config_hash={cfg_hash}  oracle_version={ORAC
+          +LE_VERSION}")                                                 
+      237      if attempts > len(successful_demos):
+      238          print(f"  ({attempts - len(successful_demos)} failed a
+           ttempts discarded)")
+      239  
+     ...
+      244      parser.add_argument("--num-demos", type=int, default=200)
+      245      parser.add_argument("--output", default="data/demos.hdf5")
+      246      parser.add_argument("--render", action="store_true")
+      247 +    parser.add_argument("--smoke", action="store_true",       
+      248 +                        help="Run N headless rollouts, report 
+          +success rate, no save.")                                      
+      249 +    parser.add_argument("--smoke-n", type=int, default=50)    
+      250 +    parser.add_argument("--smoke-threshold", type=float, defau
+          +lt=0.95)                                                      
+      251      args = parser.parse_args()
+      252  
+      253      with open(args.config) as f:
+      254          config = yaml.safe_load(f)
+      255  
+      143 -    collect(config, num_demos=args.num_demos, output_path=args
+          -.output, render=args.render)                                  
+      256 +    if args.smoke:                                            
+      257 +        env_cfg = dict(config.get("env", {}))                 
+      258 +        env_cfg["num_sticks"] = 1                             
+      259 +        smoke_test(env_cfg, n_rollouts=args.smoke_n, threshold
+          +=args.smoke_threshold)                                        
+      260 +    else:                                                     
+      261 +        collect(config, num_demos=args.num_demos, output_path=
+          +args.output, render=args.render)                              
+
+⏺ Now tests. First, let me check existing tests for the env so the new ones
+  don't conflict.
+
+  Read 1 file, listed 1 directory (ctrl+o to expand)
+
+⏺ Write(tests/test_env_readiness.py)
+  ⎿  Wrote 160 lines to tests/test_env_readiness.py
+       2 Env-readiness battery for StickReorderEnv with orientation-aware
+          success.
+       4 These tests are the precondition for trusting the demo-collectio
+         n pipeline:
+       5 they verify the action/obs spaces, observable wiring, success/re
+       6 (including the new yaw term), and the yaw-error helper used by b
+         oth the env
+       8 and the expert policy.
+       9 Run with:  pytest tests/test_env_readiness.py -v
+      10 """
+     … +184 lines (ctrl+o to expand)
+
+⏺ Write(tests/test_expert_policy.py)
+  ⎿  Wrote 101 lines to tests/test_expert_policy.py
+       2 Unit tests for PickPlaceExpertPolicy.
+       3 
+       4 These don't aim to verify the full success rate (that's measured
+       5 via play_env.py / smoke mode); they check the FSM contract: phas
+         e property
+       6 exists, action shape is right, episodes can advance through phas
+       7 goal_yaw is plumbed through to the rotation logic.
+       8 """
+       9 
+      10 import numpy as np
+     … +106 lines (ctrl+o to expand)
+
+⏺ Write(tests/test_dataset.py)
+  ⎿  Wrote 74 lines to tests/test_dataset.py
+       2 Tests for the demo HDF5 schema and env_config_hash helper in scr
+         ipts/collect_demos.py.
+       3 
+         l step);sts don't run a full collection (that's a separate manua
+       5 they verify the hashing function and round-trip a synthetic demo
+          through
+       7 """5 with all of the new fields (phase, is_success).
+       8 
+       9 import os
+      10 import sys
+     … +78 lines (ctrl+o to expand)
+
+⏺ Run the test battery.
+
+⏺ Bash(python -m pytest tests/ -v 2>&1 | tail -80)
+  ⎿  (eval):1: command not found: python
+
+  Listed 1 directory (ctrl+o to expand)
+
+⏺ Bash(.venv/bin/python -m pytest tests/ -v 2>&1 | tail -80)  ⎿  ============================= test session starts ====================
+     ==========
+     platform darwin -- Python 3.11.15, pytest-9.0.3, pluggy-1.6.0 -- /User
+     … +46 lines (ctrl+o to expand)
+  ⎿  (timeout 3m)
+
+⏺ All 21 tests pass. Now measure the expert success rate at the new strict 10°
+  tolerance.
+
+⏺ Bash(.venv/bin/python scripts/play_env.py --expert --episodes 30 2>&1 | tail
+      -40)
+  ⎿    stick0 initial pos: [-0.02214387  0.05402843  0.822     ]
+     Episode 12: steps=500  total_reward=396.129  success=True  phase=RETRE
+     AT
+     … +34 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+⏺ 67% at 10° tolerance — down from Alex's 92% (position-only). Let me diagnose
+  what's failing.
+
+⏺ Write(scripts/diagnose_expert.py)
+  ⎿  Wrote 88 lines to scripts/diagnose_expert.py
+      1 """
+      2 Diagnostic: run the expert N times and break down failures by
+      3 distance error vs orientation error vs both. No render.
+      4 """
+      5 
+      6 import argparse
+      7 
+      8 import numpy as np
+      9 
+     … +84 lines (ctrl+o to expand)
+
+⏺ Bash(.venv/bin/python scripts/diagnose_expert.py --episodes 30 2>&1 | tail
+      -45)
+  ⎿  [robosuite INFO] Loading controller configuration from: /Users/bautist
+     aguerra/Documents/ai_graduate_program/cs224r/final_project/source/cs22
+     4r-wire-untangling/.venv/lib/python3.11/site-packages/robosuite/contro
+     … +49 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+⏺ Yaw alignment is working perfectly (every failure has yaw < 1°). All 4
+  failures are position, with median dist 2.69cm grazing the 3cm threshold. Let
+  me split position into xy vs z to see whether to adjust z descent or xy
+  approach.
+
+⏺ Update(scripts/diagnose_expert.py)
+  ⎿  Added 7 lines, removed 2 lines
+      46  
+      47          body_id = raw.stick_body_ids[0]
+      48          pos = raw.sim.data.body_xpos[body_id]
+      49 -        dist = float(np.linalg.norm(pos - raw._goal_positions[0
+         -]))                                                            
+      49 +        delta = pos - raw._goal_positions[0]                   
+      50 +        xy_dist = float(np.linalg.norm(delta[:2]))             
+      51 +        z_dist = float(abs(delta[2]))                          
+      52 +        dist = float(np.linalg.norm(delta))                    
+      53          yaw = yaw_from_quat_wxyz(raw.sim.data.body_xquat[body_i
+          d])
+      54          yaw_err = yaw_error_mod_pi(yaw, raw.goal_yaw)
+      55  
+     ...
+      72              fail_both += 1
+      73              tag = "FAIL both"
+      74  
+      72 -        print(f"  ep {ep + 1:3d}: dist={dist*100:5.2f}cm yaw={n
+         -p.rad2deg(yaw_err):5.1f}°  {tag}")                             
+      75 +        print(f"  ep {ep + 1:3d}: dist={dist*100:5.2f}cm "     
+      76 +              f"(xy={xy_dist*100:5.2f}cm z={z_dist*100:5.2f}cm)
+         + "                                                             
+      77 +              f"yaw={np.rad2deg(yaw_err):5.1f}°  {tag}")       
+      78  
+      79      g.close()
+      80      print()
+
+⏺ Bash(.venv/bin/python scripts/diagnose_expert.py --episodes 30 2>&1 | grep -E
+      "^  ep|^Successes|^Fail|^Median")
+  ⎿    ep   1: dist= 2.65cm (xy= 0.43cm z= 2.61cm) yaw=  0.0°  OK
+       ep   2: dist= 2.74cm (xy= 0.82cm z= 2.61cm) yaw=  0.0°  OK
+       ep   3: dist= 2.80cm (xy= 1.02cm z= 2.61cm) yaw=  0.1°  OK
+     … +26 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+⏺ Found it. The z error is constant 2.61cm in every episode — it's a systematic
+  bug in _compute_goal_positions. The env's goal_z assumes table_offset is the
+  table center (so adds table_full_size[2]/2), but in this robosuite version
+  table_offset is the table top. So the goal floats 2.6cm above where the stick
+  can ever rest. Every demo grazes the threshold; orientation just nudged some
+  over.
+
+  Let me verify and fix.
+
+⏺ Bash(.venv/bin/python -c "
+      from wire_untangling.envs import StickReorderEnv…)
+  ⎿  Interrupted · What should Claude do instead?
+
+❯ i've seen some. the issue is when sticks are too far from the robot arm, when 
+   it picks it then going back it makes a strange rotation and then is not      
+  possible to put the stick in place.                                           
+  here we will take some changes that we have done previously for the 3 sticks. 
+   first the stick should be of the new length and thickness (i guess it was 20 
+   and 1 cm respectively, use 1.5 cm). then the stick should be initially       
+  randomly place but within a horizontal x line, on that x line you have choose 
+   whatever value but on the y axis it should only be small gap to choose       
+
+⏺ OK, dropping the verification — going straight to your changes. Let me check
+  the StickObject to see how radius maps to thickness, then apply both changes.
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Got it: radius is the box half-extent, so radius=0.0075 gives a 1.5cm-thick
+  stick. Now update env defaults + add narrow placement ranges.
+
+⏺ Update(wire_untangling/envs/stick_reorder.py)
+  ⎿  Added 12 lines, removed 2 lines
+       85          self,
+       86          robots,
+       87          num_sticks: int = 3,
+       88 -        stick_length: float = 0.18,                           
+       89 -        stick_radius: float = 0.012,                          
+       88 +        # 1.5 cm-thick × 20 cm-long sticks: closer to the wire
+          +-untangling target                                            
+       89 +        # than the previous 18 cm × 1.2 cm rod.               
+       90 +        stick_length: float = 0.20,                           
+       91 +        stick_radius: float = 0.0075,                         
+       92          goal_spacing: float = 0.06,
+       93          success_threshold: float = 0.03,
+       94          orientation_threshold: float = np.deg2rad(10.0),
+       95          lambda_rot: float = 0.1,
+       96          goal_yaw: float = 0.0,
+       97 +        # Initial placement: a narrow band close to the robot.
+          + Far-out spawns                                               
+       98 +        # caused the wrist to take the long way around during 
+          +transport                                                     
+       99 +        # (joint limits ⇒ visible "weird rotation") and missed
+          + the place pose,                                              
+      100 +        # so we keep sticks within the arm's comfortable works
+          +pace.                                                         
+      101 +        init_x_range=(-0.02, 0.02),                           
+      102 +        init_y_range=(-0.15, 0.15),                           
+      103          reward_shaping: bool = True,
+      104          table_full_size=(0.8, 0.8, 0.05),
+      105          table_friction=(1.0, 0.005, 0.0001),
+     ...
+      113          self.orientation_threshold = orientation_threshold
+      114          self.lambda_rot = lambda_rot
+      115          self.goal_yaw = goal_yaw
+      116 +        self.init_x_range = tuple(init_x_range)               
+      117 +        self.init_y_range = tuple(init_y_range)               
+      118          self.reward_shaping = reward_shaping
+      119          self.reward_scale = 1.0   # required by GymWrapper
+      120          self.use_object_obs = True  # always include stick pos
+           itions in obs
+
+⏺ Update(wire_untangling/envs/stick_reorder.py)
+  ⎿  Added 5 lines, removed 2 lines
+      186  
+      187          # Placement sampler for random initial positions on th
+           e table.
+      188          # ensure_valid_placement=True prevents sticks from ove
+           rlapping at spawn.
+      189 +        # Ranges are narrowed via init_x_range / init_y_range 
+          +to keep sticks                                                
+      190 +        # near the robot (avoids the wrist's long-way-around r
+          +otation when                                                  
+      191 +        # transporting from the far edge of the workspace).   
+      192          self.placement_initializer = UniformRandomSampler(
+      193              name="ObjectSampler",
+      194              mujoco_objects=self.stick_objects,
+      192 -            x_range=[-0.25, 0.25],                            
+      193 -            y_range=[-0.25, 0.25],                            
+      195 +            x_range=list(self.init_x_range),                  
+      196 +            y_range=list(self.init_y_range),                  
+      197              rotation=(-np.pi, np.pi),
+      198              rotation_axis="z",
+      199              ensure_object_boundary_in_range=False,
+
+⏺ Now update the YAML to match.
+
+⏺ Update(configs/stick_reorder.yaml)
+  ⎿  Added 4 lines, removed 2 lines
+       1  env:
+       2    robot: Panda
+       3    num_sticks: 3
+       4 -  stick_length: 0.18                                           
+       5 -  stick_radius: 0.012                                          
+       4 +  stick_length: 0.20             # 20 cm — wire-like           
+       5 +  stick_radius: 0.0075           # 1.5 cm thick (full cross-sec
+         +tion = 2 * radius)                                             
+       6    goal_spacing: 0.06
+       7    success_threshold: 0.03
+       8    orientation_threshold: 0.1745   # ~10 degrees in radians, mod
+          -π yaw error
+       9    lambda_rot: 0.1                 # weight on yaw term in dense
+           reward
+      10    goal_yaw: 0.0                   # all sticks aligned with wor
+          ld x-axis
+      11 +  init_x_range: [-0.02, 0.02]     # narrow x band near robot (s
+         +ingle x line + jitter)                                         
+      12 +  init_y_range: [-0.15, 0.15]     # small y gap; one stick fits
+         + with thin spread                                              
+      13    reward_shaping: true
+      14  
+      15  training:
+
+⏺ Also pass the new init ranges through make_env in collect_demos.py.
+
+⏺ Update(scripts/collect_demos.py)
+  ⎿  Added 8 lines, removed 3 lines
+      64  def make_env(env_cfg: dict, render: bool = False):
+      65      from wire_untangling.envs import StickReorderEnv
+      66  
+      67 -    return StickReorderEnv(                                    
+      67 +    kw = dict(                                                 
+      68          robots=env_cfg.get("robot", "Panda"),
+      69          num_sticks=env_cfg.get("num_sticks", 1),
+      70 -        stick_length=env_cfg.get("stick_length", 0.18),        
+      71 -        stick_radius=env_cfg.get("stick_radius", 0.012),       
+      70 +        stick_length=env_cfg.get("stick_length", 0.20),        
+      71 +        stick_radius=env_cfg.get("stick_radius", 0.0075),      
+      72          goal_spacing=env_cfg.get("goal_spacing", 0.06),
+      73          success_threshold=env_cfg.get("success_threshold", 0.03
+          ),
+      74          orientation_threshold=env_cfg.get("orientation_threshol
+          d", np.deg2rad(10.0)),
+     ...
+      81          control_freq=20,
+      82          horizon=env_cfg.get("horizon", 500),
+      83      )
+      84 +    if "init_x_range" in env_cfg:                              
+      85 +        kw["init_x_range"] = tuple(env_cfg["init_x_range"])    
+      86 +    if "init_y_range" in env_cfg:                              
+      87 +        kw["init_y_range"] = tuple(env_cfg["init_y_range"])    
+      88 +    return StickReorderEnv(**kw)                               
+      89  
+      90  
+      91  def run_episode(gym_env, expert, render: bool = False):
+
+⏺ Bash(.venv/bin/python -m pytest tests/ -v 2>&1 | tail -30)
+  ⎿                      placed_objects[obj.name] = (pos, quat, obj)
+                         success = True
+                         break
+     … +34 lines (ctrl+o to expand)
+  ⎿  (timeout 3m)
+
+⏺ The existing N=2 test conflicts with the new narrow defaults — 2 × 20cm sticks
+   can't fit in the 30cm-wide y band when randomly rotated. Easy fix: that
+  fixture should pass its own wider ranges.
+⏺ Update(tests/test_stick_reorder.py)
+  ⎿  Added 4 lines
+      15      e = StickReorderEnv(
+      16          robots="Panda",
+      17          num_sticks=2,
+      18 +        # Multi-stick fixture needs a wider placement window th
+         +an the N=1 default                                             
+      19 +        # so the sampler can satisfy the no-overlap constraint 
+         +at any yaw.                                                    
+      20 +        init_x_range=(-0.20, 0.20),                            
+      21 +        init_y_range=(-0.20, 0.20),                            
+      22          has_renderer=False,
+      23          has_offscreen_renderer=False,
+      24          use_camera_obs=False,
+
+⏺ Bash(.venv/bin/python -m pytest tests/ -v 2>&1 | tail -25)
+  ⎿  tests/test_expert_policy.py::test_expert_phase_advances PASSED
+        [ 61%]
+     tests/test_expert_policy.py::test_goal_yaw_plumbed PASSED
+     … +25 lines (ctrl+o to expand)
+  ⎿  (timeout 3m)
+
+⏺ All 21 pass. Now you can render to verify.
+
+⏺ Status:
+
+  - Stick dims: length=0.20, radius=0.0075 (1.5cm thick) — env defaults + YAML.
+  - Init placement: init_x_range=(-0.02, 0.02), init_y_range=(-0.15, 0.15) —
+  narrow band on a single x-line, tight y jitter. Should keep sticks within the
+  arm's comfortable workspace and avoid the long-way-around wrist rotation you
+  observed.
+  - All 21 tests still pass.
+
+  To see it visually:
+  .venv/bin/mjpython scripts/play_env.py --expert --render --episodes 5
+
+  Headless success-rate check:
+  .venv/bin/python scripts/play_env.py --expert --episodes 30
+
+  One thing I found while diagnosing the 87% rate that I want to flag before
+  going further (won't fix without your OK):
+
+  The env's _compute_goal_positions adds + table_full_size[2] / 2 to goal_z,
+  treating table_offset as the table center. In this robosuite version
+  table_offset actually equals arena.table_top_abs (the top), so goal_z is being
+   computed 2.5cm too high — sticks at rest can never reach goal_z, and every
+  successful demo grazes the 3cm success_threshold (final z-error was a constant
+   2.61cm in every diagnostic run, success or fail). Your real fix would be
+  removing the half-thickness term, after which xy errors get the full 3cm
+  budget.
+
+  Want me to fix that next, or first render with the new dims/placement to
+  confirm the rotation issue is resolved?
+
+✻ Brewed for 2m 18s
+
+❯ fix it, the rotation is resolved                                              
+
+⏺ Update(wire_untangling/envs/stick_reorder.py)
+  ⎿  Added 11 lines, removed 5 lines
+      137  
+      138      def _compute_goal_positions(self) -> np.ndarray:
+      139          """Return (num_sticks, 3) array of goal xyz positions 
+           on the table.
+      140 -        Goals are centered at x=0, evenly spaced along y, rest
+          -ing on the surface.                                           
+      141 -        Only position is specified — no target orientation."""
+      140 +                                                              
+      141 +        In this robosuite version `table_offset` is the table 
+          +TOP (matches                                                  
+      142 +        ``arena.table_top_abs``), not the center. A stick at r
+          +est therefore                                                 
+      143 +        sits at z = table_offset[2] + stick_radius, which is w
+          +hat we use as                                                 
+      144 +        the goal_z. The previous implementation added ``table_
+          +full_size[2]/2``                                              
+      145 +        on top, so goal_z floated ~2.5 cm above any reachable 
+          +rest pose and                                                 
+      146 +        every demo grazed the 3 cm success_threshold on z alon
+          +e.                                                            
+      147 +        """                                                   
+      148          total_span = (self.num_sticks - 1) * self.goal_spacing
+      143 -        table_surface_z = self.table_offset[2] + self.table_fu
+          -ll_size[2] / 2                                                
+      149 +        table_top_z = self.table_offset[2]                    
+      150          return np.array(
+      151              [
+      152                  [
+      153                      0.0,
+      154                      -total_span / 2 + i * self.goal_spacing,
+      149 -                    # Stick center sits one radius above the t
+          -able surface                                                  
+      150 -                    table_surface_z + self.stick_radius + 0.00
+          -1,                                                            
+      155 +                    # Stick center rests one radius above the 
+          +table top.                                                    
+      156 +                    table_top_z + self.stick_radius,          
+      157                  ]
+      158                  for i in range(self.num_sticks)
+      159              ]
+
+⏺ Also fix the misleading table_offset comment in the env init.
+
+⏺ Update(wire_untangling/envs/stick_reorder.py)
+  ⎿  Added 3 lines, removed 1 line
+      120          self.use_object_obs = True  # always include stick pos
+           itions in obs
+      121          self.table_full_size = table_full_size
+      122          self.table_friction = table_friction
+      123 -        # Table center in world frame: (0, 0, 0.8). Surface is
+          - at 0.8 + 0.05/2 = 0.825m.                                    
+      123 +        # Table TOP in world frame: (0, 0, 0.8). (In this robo
+          +suite version                                                 
+      124 +        # table_offset == arena.table_top_abs, despite what ol
+          +der code/comments                                             
+      125 +        # may suggest.)                                       
+      126          self.table_offset = np.array([0.0, 0.0, 0.8])
+      127  
+      128          # Computed before super().__init__ so they're availabl
+           e during setup.
+
+⏺ Run tests, then re-measure expert success rate.
+
+⏺ Bash(.venv/bin/python -m pytest tests/ -v 2>&1 | tail -10)
+  ⎿      gym.logger.warn(
+
+     tests/test_env_readiness.py::test_gym_wrapper_obs_dim
+     … +12 lines (ctrl+o to expand)
+  ⎿  (timeout 3m)
+
+⏺ Bash(.venv/bin/python scripts/diagnose_expert.py --episodes 30 2>&1 | grep -E
+      "^  ep|^Successes|^Fail|^Median")
+  ⎿    ep   1: dist= 0.23cm (xy= 0.23cm z= 0.01cm) yaw=  0.0°  OK
+       ep   2: dist= 0.10cm (xy= 0.10cm z= 0.01cm) yaw=  0.2°  OK
+       ep   3: dist= 0.91cm (xy= 0.91cm z= 0.01cm) yaw=  1.3°  OK
+     … +26 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+⏺ 100% success rate (30/30). z error went from constant 2.6cm to 0.01cm; xy
+  errors all under 2cm. Let me also run the official smoke check.
+
+⏺ Bash(.venv/bin/python scripts/collect_demos.py --smoke --smoke-n 50 2>&1 |
+      tail -10)
+  ⎿    rollout 44/50: success=True final_phase=RETREAT
+       rollout 45/50: success=True final_phase=RETREAT
+       rollout 46/50: success=True final_phase=RETREAT
+     … +7 lines (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+⏺ 50/50 = 100% on the official smoke. Everything's green.
+
+  Summary of Phase 1 (N=1) on feature/phase1-n1-orientation-bc
+
+  ┌──────────────┬──────────────────────────────────────────────────────────┐
+  │    Change    │                           What                           │
+  ├──────────────┼──────────────────────────────────────────────────────────┤
+  │ Env          │ _check_success requires both position ≤ 3cm AND yaw_err  │
+  │ orientation  │ ≤ 10° (mod π). Dense reward subtracts λ_rot · yaw_err.   │
+  ├──────────────┼──────────────────────────────────────────────────────────┤
+  │              │ Removed bogus + table_full_size[2]/2 — table_offset is   │
+  │ Env goal_z   │ the table top, not center. Killed the constant 2.6cm z   │
+  │ bug          │ baseline error that was eating the entire success        │
+  │              │ budget.                                                  │
+  ├──────────────┼──────────────────────────────────────────────────────────┤
+  │ Env stick    │ length=20cm, radius=0.0075m (1.5cm thick).               │
+  │ dims         │                                                          │
+  ├──────────────┼──────────────────────────────────────────────────────────┤
+  │ Env          │ Narrow band: init_x_range=(-0.02, 0.02),                 │
+  │ placement    │ init_y_range=(-0.15, 0.15). Eliminates the               │
+  │              │ long-way-around wrist rotation from far-edge spawns.     │
+  ├──────────────┼──────────────────────────────────────────────────────────┤
+  │ Expert goal  │ Drives stick_yaw → goal_yaw (mod π) during TRANSPORT;    │
+  │ yaw          │ blocks PLACE descent until yaw within 5°. Continues fine │
+  │              │  correction during PLACE.                                │
+  ├──────────────┼──────────────────────────────────────────────────────────┤
+  │              │ Adds per-step phase (int8, 8-way IntEnum) and is_success │
+  │ HDF5 schema  │  (bool); root attrs env_config_hash (SHA256-12),         │
+  │              │ robosuite_version, oracle_version.                       │
+  ├──────────────┼──────────────────────────────────────────────────────────┤
+  │ CLI          │ --smoke mode in collect_demos.py; threshold 95% by       │
+  │              │ default.                                                 │
+  ├──────────────┼──────────────────────────────────────────────────────────┤
+  │ Tests        │ 11 new (env_readiness × 8, expert × 4, dataset × 3);     │
+  │              │ existing 6 still pass. 21/21 green.                      │
+  ├──────────────┼──────────────────────────────────────────────────────────┤
+  │ Result       │ 50/50 = 100% smoke; median final xy 0.87cm, yaw 1.0°.    │
+  └──────────────┴──────────────────────────────────────────────────────────┘
+
+  Files touched: wire_untangling/envs/stick_reorder.py,
+  wire_untangling/policies/pick_place_expert.py, configs/stick_reorder.yaml,
+  scripts/collect_demos.py, tests/test_stick_reorder.py. New:
+  wire_untangling/utils/transform.py, tests/test_env_readiness.py,
+  tests/test_expert_policy.py, tests/test_dataset.py,
+  scripts/diagnose_expert.py.
+
+  Want me to commit and push the branch / open a PR, or run a real bulk collect
+  first (--num-demos 200 --output data/demos_n1_v1.hdf5)?
+
+✻ Churned for 2m 51s
+
+❯ ok, one question: why are saving seeds? i can't render a particular one with  
+  a --seed param as we have been doing in the stashed n 3 sticks version?       
+
+⏺ Honest answer: we're not actually saving seeds right now in this N=1 version.
+  I didn't port that over from the stashed N=3 plan because Alex's HDF5 schema
+  didn't have it, and adding it without a replay tool would just be dead weight
+  — exactly your concern.
+
+  Two things were missing for seeds to be useful:
+
+  1. In the collector — each episode would need gym_env.reset(seed=demo_seed)
+  (currently it just calls reset() and lets the env's internal RNG drift).
+  Without that, the saved seed isn't actually the seed that produced the demo.
+  2. In the player — a --seed N flag on play_env.py --expert (or a dedicated
+  play_demo.py --demo-idx N) that reads the seed back from HDF5 and resets the
+  env identically.
+
+  Worth adding now? It's genuinely useful for:
+  - Replaying a failure case to debug the expert
+  - Bytewise-reproducible collection (re-run with same seed → same dataset)
+  - BC training comparing two checkpoints on the same held-out trajectories
+
+  If you want this, I'll wire all three pieces — seed control in collector,
+  per-demo seed attr in HDF5, and --seed on the renderer. Or tell me to skip it
+  and I'll commit what's there.
+
+✻ Brewed for 34s
+
+❯ yes, we have to do it as we have done it for the n 3 sticks                   
+
+⏺ Write(wire_untangling/utils/seeding.py)
+  ⎿  Wrote 40 lines to wire_untangling/utils/seeding.py
+       2 Seed control for StickReorderEnv.
+       3 
+          construction sampler captures a *reference* to the env's RNG at
+       5 time, so naively reassigning ``env.rng`` would leave the sampler
+          holding the
+         set()``erator. Both attributes are rebound here so the next ``re
+       7 produces deterministic placements.
+       9 Per-demo seed convention (matches the stashed N=3 plan): ``top_s
+         eed`` sets the
+      10 generator for the whole collection, and the i-th demo uses
+     … +38 lines (ctrl+o to expand)
+
+⏺ Now wire the seeding into collect_demos.py.
+⏺ Update(scripts/collect_demos.py)
+  ⎿  Added 9 lines, removed 2 lines
+       88      return StickReorderEnv(**kw)
+       89  
+       90  
+       91 -def run_episode(gym_env, expert, render: bool = False):       
+       92 -    """Run one expert rollout. Returns per-step lists and fina
+          -l success."""                                                 
+       91 +def run_episode(gym_env, expert, render: bool = False, seed: i
+          +nt | None = None):                                            
+       92 +    """Run one expert rollout. Returns per-step lists and fina
+          +l success.                                                    
+       93 +                                                              
+       94 +    If ``seed`` is provided, the env's RNG is rebound before r
+          +eset so the                                                   
+       95 +    initial stick placement is deterministic from the seed.   
+       96 +    """                                                       
+       97 +    if seed is not None:                                      
+       98 +        from wire_untangling.utils.seeding import seed_env    
+       99 +        seed_env(gym_env.env, seed)                           
+      100      obs, _ = gym_env.reset()
+      101      expert.reset()
+      102  
+
+⏺ Update(scripts/collect_demos.py)
+  ⎿  Added 17 lines, removed 8 lines
+      182      config: dict,
+      183      num_demos: int,
+      184      output_path: str,
+      185 +    top_seed: int,                                            
+      186      render: bool = False,
+      187      max_attempts_factor: int = 3,
+      188  ):
+     ...
+      190      from robosuite.wrappers import GymWrapper
+      191  
+      192      from wire_untangling.policies import PickPlaceExpertPolicy
+           , build_obs_index_map
+      193 +    from wire_untangling.utils.seeding import demo_seed       
+      194  
+      195      env_cfg = dict(config.get("env", {}))
+      196      env_cfg["num_sticks"] = 1  # single-stick BC for now
+     ...
+      205  
+      206      os.makedirs(os.path.dirname(output_path) or ".", exist_ok=
+           True)
+      207  
+      206 -    successful_demos = []                                     
+      208 +    # successful_demos holds (seed, ep_dict). We use the attem
+          +pt index, not the                                             
+      209 +    # success index, so re-running collection with the same to
+          +p_seed retries                                                
+      210 +    # the same failed seeds in the same order — bytewise repro
+          +ducible.                                                      
+      211 +    successful_demos: list[tuple[int, dict]] = []             
+      212      attempts = 0
+      213      max_attempts = num_demos * max_attempts_factor
+      214  
+      215      while len(successful_demos) < num_demos and attempts < max
+           _attempts:
+      216 +        seed = demo_seed(top_seed, attempts)                  
+      217 +        ep = run_episode(gym_env, expert, render=render, seed=
+          +seed)                                                         
+      218          attempts += 1
+      212 -        ep = run_episode(gym_env, expert, render=render)      
+      219  
+      220          if ep["final_success"]:
+      215 -            successful_demos.append(ep)                       
+      221 +            successful_demos.append((seed, ep))               
+      222              print(f"  Demo {len(successful_demos)}/{num_demos}
+            collected "
+      217 -                  f"(attempt {attempts}, {len(ep['obs'])} step
+          -s)")                                                          
+      223 +                  f"(attempt {attempts}, seed={seed}, {len(ep[
+          +'obs'])} steps)")                                             
+      224          else:
+      225              from wire_untangling.policies.pick_place_expert im
+           port Phase
+      220 -            print(f"  Attempt {attempts} failed (final_phase={
+          -Phase(ep['final_phase']).name}, "                             
+      226 +            print(f"  Attempt {attempts} failed "             
+      227 +                  f"(seed={seed}, final_phase={Phase(ep['final
+          +_phase']).name}, "                                            
+      228                    f"{len(ep['obs'])} steps) — skipping")
+      229  
+      230      gym_env.close()
+     ...
+      233          print("No successful demos collected!")
+      234          return
+      235  
+      229 -    total_samples = sum(d["obs"].shape[0] for d in successful_
+          -demos)                                                        
+      236 +    total_samples = sum(d["obs"].shape[0] for _, d in successf
+          +ul_demos)                                                     
+      237      with h5py.File(output_path, "w") as f:
+      238          data_grp = f.create_group("data")
+      232 -        for i, demo in enumerate(successful_demos):           
+      239 +        for i, (seed, demo) in enumerate(successful_demos):   
+      240              grp = data_grp.create_group(f"demo_{i}")
+      241              for key in ("obs", "actions", "rewards", "dones",
+      242                          "next_obs", "phase", "is_success"):
+      243                  grp.create_dataset(key, data=demo[key], compre
+           ssion="gzip")
+      244 +            grp.attrs["seed"] = int(seed)                     
+      245  
+      246          f.attrs["num_demos"] = len(successful_demos)
+      247          f.attrs["obs_dim"] = obs_dim
+     ...
+      250          f.attrs["env_config_hash"] = cfg_hash
+      251          f.attrs["robosuite_version"] = robosuite.__version__
+      252          f.attrs["oracle_version"] = ORACLE_VERSION
+      253 +        f.attrs["top_seed"] = int(top_seed)                   
+      254  
+      255      print(f"\nSaved {len(successful_demos)} demos ({total_samp
+           les} total transitions) "
+      256            f"to {output_path}")
+      248 -    print(f"  env_config_hash={cfg_hash}  oracle_version={ORAC
+          -LE_VERSION}")                                                 
+      257 +    print(f"  env_config_hash={cfg_hash}  oracle_version={ORAC
+          +LE_VERSION}  top_seed={top_seed}")                            
+      258      if attempts > len(successful_demos):
+      259          print(f"  ({attempts - len(successful_demos)} failed a
+           ttempts discarded)")
+      260  
+
+⏺ Now wire --seed and --top-seed through the CLI, and into the smoke test too.
+
+⏺ Update(scripts/collect_demos.py)
+  ⎿  Added 11 lines, removed 4 lines
+      140      }
+      141  
+      142  
+      143 -def smoke_test(env_cfg: dict, n_rollouts: int, threshold: floa
+          -t):                                                           
+      144 -    """Run n_rollouts headless and report success rate. Exit 1
+          - if below threshold."""                                       
+      143 +def smoke_test(env_cfg: dict, n_rollouts: int, threshold: floa
+          +t, top_seed: int):                                            
+      144 +    """Run n_rollouts headless and report success rate. Exit 1
+          + if below threshold.                                          
+      145 +                                                              
+      146 +    Each rollout uses ``demo_seed(top_seed, i)`` so the smoke 
+          +test is itself                                                
+      147 +    bytewise reproducible.                                    
+      148 +    """                                                       
+      149      from robosuite.wrappers import GymWrapper
+      150  
+      151      from wire_untangling.policies import PickPlaceExpertPolicy
+           , build_obs_index_map
+      152      from wire_untangling.policies.pick_place_expert import Pha
+           se
+      153 +    from wire_untangling.utils.seeding import demo_seed       
+      154  
+      155      raw_env = make_env(env_cfg, render=False)
+      156      gym_env = GymWrapper(raw_env)
+     ...
+      161      failure_phases: dict[int, int] = {}
+      162  
+      163      for i in range(n_rollouts):
+      159 -        ep = run_episode(gym_env, expert)                     
+      164 +        seed = demo_seed(top_seed, i)                         
+      165 +        ep = run_episode(gym_env, expert, seed=seed)          
+      166          if ep["final_success"]:
+      167              successes += 1
+      168          else:
+      169              failure_phases[ep["final_phase"]] = failure_phases
+           .get(ep["final_phase"], 0) + 1
+      164 -        print(f"  rollout {i + 1}/{n_rollouts}: success={ep['f
+          -inal_success']} "                                             
+      170 +        print(f"  rollout {i + 1}/{n_rollouts}: seed={seed} " 
+      171 +              f"success={ep['final_success']} "               
+      172                f"final_phase={Phase(ep['final_phase']).name}")
+      173  
+      174      gym_env.close()
+  ⎿  You've hit your limit · resets 10:40pm (America/Los_Angeles)
+     /upgrade to increase your usage limit.
+
+✻ Worked for 1m 32s

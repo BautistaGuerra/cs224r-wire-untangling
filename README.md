@@ -66,6 +66,34 @@ modal run modal_train.py
 
 GPU type and timeout are set in `configs/stick_reorder.yaml` under `modal.gpu` / `modal.timeout` — no code changes needed to switch hardware.
 
+### Modal DPFM / flow-matching training
+
+DPFM training uses offline HDF5 demos, so the demo file must be uploaded to the
+Modal data volume before the remote GPU job can read it. The helper below can
+upload and train in one command:
+
+```bash
+modal run modal_train_flow_matching.py \
+    --env-config configs/stick_reorder_n2_random_order.yaml \
+    --demos-path data/stick_n2_random_order_demos.hdf5 \
+    --checkpoint-dir checkpoints/dpfm_n2_random_phase_active \
+    --conditioning phase-active \
+    --upload-demos
+```
+
+For a demo file already in the Modal volume, pass the mounted path directly:
+
+```bash
+modal run modal_train_flow_matching.py \
+    --env-config configs/stick_reorder_n2_random_order.yaml \
+    --demos-path /data/stick_n2_random_order_demos.hdf5 \
+    --checkpoint-dir /checkpoints/dpfm_n2_random_obs \
+    --conditioning obs
+```
+
+Saved policies are written to the `cs224r-checkpoints` Modal volume under
+`/checkpoints/...`.
+
 ## Structure
 
 ```

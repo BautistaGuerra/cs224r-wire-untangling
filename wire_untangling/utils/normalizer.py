@@ -53,6 +53,7 @@ class Normalizer:
         clip_low: np.ndarray | torch.Tensor | None = None,
         clip_high: np.ndarray | torch.Tensor | None = None,
         warn_on_clip: bool = False,
+        default_scale: float | None = None,
     ):
         """Construct a Normalizer from pre-computed statistics.
 
@@ -66,9 +67,13 @@ class Normalizer:
                        denormalization.  Typically the env's action_high.
             warn_on_clip: If True, log a warning when denormalized values
                        exceed clip bounds.
+            default_scale: Optional scale floor. Defaults to ``EPS`` to preserve
+                       existing checkpoint behavior unless callers opt in to a
+                       larger floor.
         """
+        scale_floor = self.EPS if default_scale is None else float(default_scale)
         self.loc = np.asarray(loc, dtype=np.float32)
-        self.scale = np.maximum(np.asarray(scale, dtype=np.float32), self.EPS)
+        self.scale = np.maximum(np.asarray(scale, dtype=np.float32), scale_floor)
         self.clip_low = np.asarray(clip_low, dtype=np.float32) if clip_low is not None else None
         self.clip_high = np.asarray(clip_high, dtype=np.float32) if clip_high is not None else None
         self.warn_on_clip = warn_on_clip
@@ -178,6 +183,7 @@ class Normalizer:
         data: np.ndarray,
         clip_low: np.ndarray | None = None,
         clip_high: np.ndarray | None = None,
+        default_scale: float | None = None,
     ) -> Normalizer:
         """Compute per-dimension mean/std from a (N, D) dataset and build a Normalizer."""
         return cls(
@@ -185,4 +191,5 @@ class Normalizer:
             scale=data.std(axis=0).astype(np.float32),
             clip_low=clip_low,
             clip_high=clip_high,
+            default_scale=default_scale,
         )

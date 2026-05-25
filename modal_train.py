@@ -47,9 +47,11 @@ image = (
         "pyyaml",
         "h5py",
     )
+    .run_commands("pip uninstall -y triton")
     .env({
         "MUJOCO_GL": "osmesa",
         "PYOPENGL_PLATFORM": "osmesa",
+        "TORCH_COMPILE_DISABLE": "1",
     })
     .add_local_python_source("wire_untangling")
     .add_local_dir("scripts", remote_path="/root/scripts")

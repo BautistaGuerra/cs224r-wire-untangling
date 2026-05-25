@@ -40,6 +40,13 @@ class TestFromData:
         assert n.scale[0] == pytest.approx(Normalizer.EPS)
         assert n.scale[1] > Normalizer.EPS
 
+    def test_default_scale_can_be_overridden(self):
+        """Callers can request a larger local scale floor without changing EPS."""
+        data = np.array([[5, 1], [5, 2], [5, 3]], dtype=np.float32)
+        n = Normalizer.from_data(data, default_scale=0.1)
+        assert Normalizer.EPS == pytest.approx(1e-6)
+        assert n.scale[0] == pytest.approx(0.1)
+
     def test_clips_stored(self):
         """clip_low and clip_high should be stored when provided."""
         data = np.ones((3, 2), dtype=np.float32)
