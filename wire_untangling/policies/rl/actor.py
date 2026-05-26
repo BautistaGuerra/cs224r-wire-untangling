@@ -53,5 +53,3 @@ class RRLActor(nn.Module):
         action_dist = TruncatedNormal(scaled_mu, std)
 
         return action_dist  # noqa: RET504
-
-

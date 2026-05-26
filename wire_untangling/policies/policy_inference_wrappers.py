@@ -8,6 +8,7 @@ from wire_untangling.policies.mlp_bc import MLPBCPolicy
 from wire_untangling.policies.flow_matching_policy import FlowMatchingPolicy
 from wire_untangling.policies.rl.agent import TD3Agent
 from wire_untangling.utils.normalizer import Normalizer
+from wire_untangling.utils.stick_order import StickOrderScheduler
 from wire_untangling.policies import PickPlaceExpertPolicy, build_obs_index_map
 
 
@@ -30,7 +31,7 @@ class ModelPolicy(object):
     def predict(self, obs:torch.Tensor) -> torch.Tensor:
         pass
 
-    def reset(self):
+    def reset(self, stick_order=None):
         pass
 
 
@@ -76,13 +77,21 @@ class MLPBCModelPolicy(ModelPolicy):
         assert "obs_norm" in ckpt
         self.obs_norm = Normalizer.from_state_dict(ckpt["obs_norm"])
 
-    def set_gym_env(self, gym_env):
+    def set_gym_env(self, gym_env, expert_cfg: dict | None = None):
         if self.conditioning != "phase-active":
             return
+        env_num_sticks = int(getattr(gym_env.env, "num_sticks", self.num_sticks))
+        if env_num_sticks != self.num_sticks:
+            raise ValueError(
+                f"Checkpoint expects num_sticks={self.num_sticks}, "
+                f"but env has num_sticks={env_num_sticks}"
+            )
+        order_schedule = StickOrderScheduler(expert_cfg, self.num_sticks)
         obs_map = build_obs_index_map(gym_env)
         self._phase_tracker = PickPlaceExpertPolicy(
             obs_map,
             goal_yaw=self.goal_yaw,
+            stick_order=order_schedule.order_for(0),
         )
 
     def _build_state(self, obs: np.ndarray) -> np.ndarray:
@@ -119,9 +128,9 @@ class MLPBCModelPolicy(ModelPolicy):
             action = self.model(normed)[0]
         return action.cpu().numpy()
 
-    def reset(self):
+    def reset(self, stick_order=None):
         if self._phase_tracker is not None:
-            self._phase_tracker.reset()
+            self._phase_tracker.reset(stick_order=stick_order)
 
 
 class DPFMModelPolicy(ModelPolicy):
@@ -162,7 +171,7 @@ class DPFMModelPolicy(ModelPolicy):
         self._nchunk = None
         self._chunk_idx = 0
 
-    def reset(self):
+    def reset(self, stick_order=None):
         self._chunk = None
         self._nchunk = None
         self._chunk_idx = 0
@@ -232,8 +241,8 @@ class ResidualRLPolicy(ModelPolicy):
         self.rrl_model.eval()
 
 
-    def reset(self):
-        self.base_policy.reset()
+    def reset(self, stick_order=None):
+        self.base_policy.reset(stick_order=stick_order)
 
     def predict_rrl(self, obs: np.ndarray) -> np.ndarray:
         """Predicts the action using residual RL.
@@ -275,4 +284,3 @@ class ResidualRLPolicy(ModelPolicy):
         """Predict unnormalized action value, i.e. in the original policy scope. Used for rollouts."""
         action, _, _ = self.predict_rrl(obs)
         return action
-

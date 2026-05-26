@@ -253,7 +253,6 @@ class TruncatedNormal(pyd.Normal):
         clamped_x = torch.clamp(x, self.low + self.eps, self.high - self.eps)
         x = x - x.detach() + clamped_x.detach()
         return x
-
     def sample(self, clip=None, sample_shape=None):
         if sample_shape is None:
             sample_shape = torch.Size()
@@ -272,5 +271,3 @@ class TruncatedNormal(pyd.Normal):
             # Not used currently
             x = clip_action_norm(x, self.max_action_norm)
         return x
-
-

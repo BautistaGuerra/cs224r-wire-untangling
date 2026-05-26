@@ -85,3 +85,14 @@ def test_n2_expert_switches_active_stick_at_retreat(side_env):
 
     assert expert.active_stick == 1
     assert expert.phase == Phase.APPROACH
+
+
+def test_n2_expert_reset_accepts_episode_stick_order(side_env):
+    gym_env = GymWrapper(side_env)
+    obs_map = build_obs_index_map(gym_env)
+    expert = PickPlaceExpertPolicy(obs_map, stick_order=(0, 1))
+
+    expert.reset(stick_order=(1, 0))
+
+    assert expert.active_stick == 1
+    assert expert.phase == Phase.APPROACH
