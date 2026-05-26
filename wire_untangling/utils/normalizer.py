@@ -28,9 +28,12 @@ from __future__ import annotations
 import logging
 import numpy as np
 import torch
+from torch import distributions as pyd
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_SCALE_OBSERVATIONS = 1e-6 #1e-3
+DEFAULT_SCALE_ACTIONS = 1e-6 #1e-2
 
 class Normalizer:
     """Per-dimension z-score normalizer that works with both numpy and torch.
@@ -44,7 +47,7 @@ class Normalizer:
 
     # Floor for scale values.  Any dimension whose standard deviation is below
     # this threshold is treated as constant; its normalized output will be ~0.
-    EPS = 1e-6
+    EPS = 1e-6 # 1e-1
 
     def __init__(
         self,
@@ -53,6 +56,7 @@ class Normalizer:
         clip_low: np.ndarray | torch.Tensor | None = None,
         clip_high: np.ndarray | torch.Tensor | None = None,
         warn_on_clip: bool = False,
+        default_scale: float = EPS
     ):
         """Construct a Normalizer from pre-computed statistics.
 
@@ -66,9 +70,12 @@ class Normalizer:
                        denormalization.  Typically the env's action_high.
             warn_on_clip: If True, log a warning when denormalized values
                        exceed clip bounds.
+            default_scale: the default gard value on the stnadard deviation. If the
+                        std. dev of the dimension is < default_scale, std. dev is
+                        set to default scale to prevent blow of OOD values.
         """
         self.loc = np.asarray(loc, dtype=np.float32)
-        self.scale = np.maximum(np.asarray(scale, dtype=np.float32), self.EPS)
+        self.scale = np.maximum(np.asarray(scale, dtype=np.float32), default_scale)
         self.clip_low = np.asarray(clip_low, dtype=np.float32) if clip_low is not None else None
         self.clip_high = np.asarray(clip_high, dtype=np.float32) if clip_high is not None else None
         self.warn_on_clip = warn_on_clip
@@ -162,7 +169,12 @@ class Normalizer:
 
     @classmethod
     def from_state_dict(cls, d: dict) -> Normalizer:
-        """Reconstruct a Normalizer from a checkpoint state dict."""
+        """Reconstruct a Normalizer from a checkpoint state dict.
+
+        Uses a small default_scale (1e-6) to preserve the exact scale values
+        that were stored at training time, avoiding re-clamping with the
+        current class-level EPS which may differ.
+        """
         return cls(
             loc=d["loc"].cpu().numpy(),
             scale=d["scale"].cpu().numpy(),
@@ -178,6 +190,7 @@ class Normalizer:
         data: np.ndarray,
         clip_low: np.ndarray | None = None,
         clip_high: np.ndarray | None = None,
+        default_scale: float = EPS
     ) -> Normalizer:
         """Compute per-dimension mean/std from a (N, D) dataset and build a Normalizer."""
         return cls(
@@ -185,4 +198,79 @@ class Normalizer:
             scale=data.std(axis=0).astype(np.float32),
             clip_low=clip_low,
             clip_high=clip_high,
+            default_scale=default_scale
         )
+
+
+# ── Tensor batch-dimension helpers ──────────────────────────────────────────
+# Adapted from residual-offpolicy-rl (Amazon, CC-BY-NC-4.0)
+
+def maybe_unsqueeze(t: torch.Tensor) -> tuple[torch.Tensor, bool]:
+    """Add a leading batch dim if tensor is 1-D. Returns (tensor, was_unsqueezed)."""
+    if t.dim() == 1:
+        return t.unsqueeze(0), True
+    return t, False
+
+
+def maybe_squeeze(t: torch.Tensor, was_unsqueezed: bool) -> torch.Tensor:
+    """Remove the leading batch dim if it was added by maybe_unsqueeze."""
+    if was_unsqueezed:
+        return t.squeeze(0)
+    return t
+
+
+# ── Action norm clipping ────────────────────────────────────────────────────
+# Taken from the residual-offpolicy-rl Amazon codebase.
+from torch.distributions.utils import _standard_normal
+def clip_action_norm(action, max_norm):
+    assert max_norm > 0
+    assert action.dim() == 2 and action.size(1) == 7
+
+    ee_action = action[:, :6]
+    gripper_action = action[:, 6:]
+
+    ee_action_norm = ee_action.norm(dim=1).unsqueeze(1)
+    ee_action = ee_action / ee_action_norm
+    assert (ee_action.norm(dim=1).min() - 1).abs() <= 1e-5
+    scale = ee_action_norm.clamp(max=max_norm)
+    ee_action = ee_action * scale
+    action = torch.cat([ee_action, gripper_action], dim=1)
+    return action  # noqa: RET504
+
+
+class TruncatedNormal(pyd.Normal):
+    def __init__(self, loc, scale, low=-1.0, high=1.0, eps=1e-6, max_action_norm: float = -1):
+        if isinstance(scale, float):
+            scale = torch.ones_like(loc) * scale
+
+        super().__init__(loc, scale, validate_args=False)
+        self.low = low
+        self.high = high
+        self.eps = eps
+        self.max_action_norm = max_action_norm
+
+    def _clamp(self, x):
+        clamped_x = torch.clamp(x, self.low + self.eps, self.high - self.eps)
+        x = x - x.detach() + clamped_x.detach()
+        return x
+
+    def sample(self, clip=None, sample_shape=None):
+        if sample_shape is None:
+            sample_shape = torch.Size()
+        shape = self._extended_shape(sample_shape)
+        # Sample the "additional noise" from the unit normal
+        eps = _standard_normal(shape, dtype=self.loc.dtype, device=self.loc.device)
+        # Scale it down to the residual action scale
+        eps *= self.scale
+        if clip is not None:
+            # If we request, clip the predicted action into the [-clip; clip] range.
+            eps = torch.clamp(eps, -clip, clip)
+        # Add residual noise to the predicted mean.
+        x = self.loc + eps
+        x = self._clamp(x)
+        if self.max_action_norm > 0:
+            # Not used currently
+            x = clip_action_norm(x, self.max_action_norm)
+        return x
+
+
