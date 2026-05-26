@@ -6,7 +6,7 @@ import torch
 
 from scripts.train_flow_matching import load_data
 from wire_untangling.utils.normalizer import Normalizer
-from scripts.play_env import DPFMModelPolicy
+from wire_untangling.policies.policy_inference_wrappers import DPFMModelPolicy
 from wire_untangling.policies.flow_matching_policy import FlowMatchingSchedule
 
 
@@ -31,7 +31,7 @@ def test_flow_matching_sample_is_unclamped_by_default():
         def forward(self, action, state, timestep):
             return torch.full_like(action, -10.0)
 
-    schedule = FlowMatchingSchedule(action_dim=5, device="cpu", num_steps=2)
+    schedule = FlowMatchingSchedule(action_dim=5, device="cpu", num_integration_steps=2)
     state = torch.zeros(3, 4)
     sample = schedule.sample(ConstantVelocity(), state)
 
@@ -44,7 +44,7 @@ def test_flow_matching_sample_accepts_deterministic_initial_noise():
         def forward(self, action, state, timestep):
             return torch.ones_like(action)
 
-    schedule = FlowMatchingSchedule(action_dim=4, device="cpu", num_steps=2)
+    schedule = FlowMatchingSchedule(action_dim=4, device="cpu", num_integration_steps=2)
     state = torch.zeros(2, 3)
     initial_noise = torch.zeros(2, 4)
     sample_a = schedule.sample(ConstantVelocity(), state, initial_noise=initial_noise)
@@ -98,16 +98,18 @@ def test_dpfm_policy_executes_chunk_before_requerying():
     policy.action_low = np.array([-1.0, -1.0], dtype=np.float32)
     policy.action_high = np.array([1.0, 1.0], dtype=np.float32)
     policy._chunk = None
+    policy._nchunk = None
     policy._chunk_idx = 0
     calls = {"n": 0}
 
     def sample_chunk(self, obs):
         calls["n"] += 1
         offset = 10 * calls["n"]
-        return np.array(
+        chunk = np.array(
             [[offset + i, offset + i + 0.5] for i in range(self.pred_horizon)],
             dtype=np.float32,
         )
+        return chunk, chunk
 
     policy._sample_chunk = types.MethodType(sample_chunk, policy)
 

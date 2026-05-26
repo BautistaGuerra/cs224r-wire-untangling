@@ -24,6 +24,7 @@ import torch
 import wandb
 import yaml
 from torch.utils.data import DataLoader, TensorDataset
+from wire_untangling.utils.normalizer import Normalizer, DEFAULT_SCALE_OBSERVATIONS, DEFAULT_SCALE_ACTIONS
 
 from wire_untangling.policies.mlp_bc import MLPBCPolicy, mse_loss
 
@@ -125,7 +126,7 @@ def load_data(
     batch_size: int = 256,
     shuffle: bool = True,
     conditioning: str = CONDITIONING_OBS,
-) -> tuple[DataLoader, int, int, np.ndarray, np.ndarray, dict]:
+) -> tuple[DataLoader, int, int, Normalizer, dict]:
     """Load (state, action) pairs from HDF5, normalise states.
 
     No action chunking — MLP-BC predicts one action per state, so each demo
@@ -171,12 +172,15 @@ def load_data(
         )
     state_dim = state.shape[1]
 
-    # Per-dim z-score stats. eps avoids /0 on dims that happen to be
-    # constant in the demos (e.g. goal_pos at N=1 is fixed every episode).
-    state_mean = state.mean(axis=0).astype(np.float32)
-    state_std = state.std(axis=0).astype(np.float32)
-    state_std = np.maximum(state_std, 1e-6)
-    state_normed = ((state - state_mean) / state_std).astype(np.float32)
+    # # Per-dim z-score stats. eps avoids /0 on dims that happen to be
+    # # constant in the demos (e.g. goal_pos at N=1 is fixed every episode).
+    # state_mean = state.mean(axis=0).astype(np.float32)
+    # state_std = state.std(axis=0).astype(np.float32)
+    # state_std = np.maximum(state_std, 1e-6)
+    # state_normed = ((state - state_mean) / state_std).astype(np.float32)
+    obs_norm = Normalizer.from_data(state, default_scale=DEFAULT_SCALE_OBSERVATIONS)
+    state_normed = obs_norm.normalize(state)
+
 
     s = torch.tensor(state_normed, dtype=torch.float32)
     a = torch.tensor(flat_actions, dtype=torch.float32)
@@ -189,7 +193,7 @@ def load_data(
         "num_phases": NUM_PHASES,
         "num_sticks": num_sticks,
     }
-    return loader, state_dim, action_dim, state_mean, state_std, meta
+    return loader, state_dim, action_dim, obs_norm, meta
 
 
 def train(
@@ -216,7 +220,7 @@ def train(
         device = torch.device("cpu")
     print(f"Training device: {device}")
 
-    loader, state_dim, action_dim, state_mean, state_std, conditioning_meta = load_data(
+    loader, state_dim, action_dim, obs_norm, conditioning_meta = load_data(
         demos_path,
         batch_size=batch_size,
         conditioning=conditioning,
@@ -283,8 +287,7 @@ def train(
         "dropout": dropout,
         # Stored as torch tensors so torch.load(weights_only=True) accepts
         # them without an allowlist (PyTorch 2.6+ rejects numpy by default).
-        "state_mean": torch.from_numpy(state_mean),
-        "state_std": torch.from_numpy(state_std),
+        "obs_norm": obs_norm.state_dict(),
     }, save_path)
     print(f"Model saved to {save_path}")
 

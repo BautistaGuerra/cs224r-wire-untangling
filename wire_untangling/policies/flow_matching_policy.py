@@ -237,16 +237,16 @@ class FlowMatchingSchedule:
     Args:
         action_dim: dimensionality of the flattened action chunk.
         device: torch device string.
-        num_steps: number of integration steps for sampling.
+        num_integration_steps: number of integration steps for sampling.
         clamp_sample: Optional final sample clamp. Disabled by default because
             checkpoint playback clips denormalized actions to env bounds.
     """
 
-    def __init__(self, action_dim=1, device='cpu', num_steps=20,
+    def __init__(self, action_dim=1, device='cpu', num_integration_steps=20,
                  clamp_sample: bool = False):
         self.action_dim = action_dim
         self.device = device
-        self.num_steps = num_steps
+        self.num_integration_steps = num_integration_steps
         self.clamp_sample = clamp_sample
 
     def interpolate(self, x1, t):
@@ -288,9 +288,9 @@ class FlowMatchingSchedule:
                 raise ValueError(
                     f"initial_noise must have shape {(B, self.action_dim)}, got {tuple(a.shape)}"
                 )
-        dt = 1 / self.num_steps
+        dt = 1 / self.num_integration_steps
         t = torch.zeros(B, dtype=torch.float32, device=device)
-        for _ in range(self.num_steps):
+        for _ in range(self.num_integration_steps):
             v = model(a, state, t)
             a = a + dt*v
             t = t + dt
@@ -307,13 +307,13 @@ class FlowMatchingPolicy(nn.Module):
     """TemporalNoisePredictor + FlowMatchingSchedule bundled together."""
 
     def __init__(self, state_dim, pred_horizon, action_dim,
-                 num_steps, device='cuda'):
+                 num_integration_steps, device='cuda'):
         """Implements the flow matching policy.
         Args:
             state_dim: dimensionality of the state
             pred_horizon: prediction horizon (aka chunk size for  action chunking)
             action_dim: dimensionality of the action
-            num_steps: number of integration steps for sampling.
+            num_integration_steps: number of integration steps for sampling.
         """
         super().__init__()
         self.model = TemporalNoisePredictor(
@@ -325,7 +325,7 @@ class FlowMatchingPolicy(nn.Module):
         self.schedule = FlowMatchingSchedule(
             action_dim=pred_horizon * action_dim,
             device=device,
-            num_steps=num_steps,
+            num_integration_steps=num_integration_steps,
         )
 
     def forward(self, noisy_action, state, timestep):
