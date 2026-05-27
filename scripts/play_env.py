@@ -139,7 +139,7 @@ def run_random(env, n_episodes: int = 2, render: bool = False, fps: int = 20, re
     env.close()
 
 
-def run_policy(env, policy:ModelPolicy, n_episodes: int = 2, render: bool = False, fps: int = 20, record_path: str = None):
+def run_policy(env, policy:ModelPolicy, n_episodes: int = 2, render: bool = False, fps: int = 20, record_path: str = None, results_file: str = None):
     """Run a trained policy in the environment and report success rate.
     Uses GymWrapper to produce the flat obs vector the policy expects,
     while keeping the underlying Robosuite renderer active."""
@@ -183,8 +183,18 @@ def run_policy(env, policy:ModelPolicy, n_episodes: int = 2, render: bool = Fals
 
     mean_reward = np.mean(total_rewards)
     std_reward = np.std(total_rewards)
-    print(f"\nSuccess rate: {successes}/{n_episodes} ({successes/n_episodes:.0%})")
+    success_rate = successes / n_episodes
+    print(f"\nSuccess rate: {successes}/{n_episodes} ({success_rate:.0%})")
     print(f"Reward: {mean_reward:.3f} ± {std_reward:.3f}")
+
+    if results_file:
+        os.makedirs(os.path.dirname(results_file) or ".", exist_ok=True)
+        with open(results_file, "w") as f:
+            f.write(f"success_rate: {success_rate:.4f}\n")
+            f.write(f"successes: {successes}/{n_episodes}\n")
+            f.write(f"mean_reward: {mean_reward:.4f}\n")
+            f.write(f"std_reward: {std_reward:.4f}\n")
+        print(f"Results saved to {results_file}")
 
     if writer:
         writer.close()
@@ -265,6 +275,8 @@ if __name__ == "__main__":
     parser.add_argument("--fps", type=int, default=20, help="Target render FPS (default 20)")
     parser.add_argument("--gym", action="store_true", help="Print Gymnasium spaces")
     parser.add_argument("--episodes", type=int, default=2)
+    parser.add_argument("--results-file", type=str, default=None,
+                        help="Save success rate and reward stats to a text file")
     parser.add_argument("--config", default=None,
                         help="Optional YAML config for env/expert settings, e.g. configs/stick_reorder_n2.yaml")
     parser.add_argument("--bc_checkpoint", type=str, default=None,
@@ -315,10 +327,10 @@ if __name__ == "__main__":
         )
     elif args.bc_checkpoint:
         policy = MLPBCModelPolicy(args.bc_checkpoint, env)
-        run_policy(env, policy, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record)
+        run_policy(env, policy, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record, results_file=args.results_file)
     # elif args.sac_checkpoint:
     #     policy = SACModelPolicy(args.sac_checkpoint, env)
-    #     run_policy(env, policy, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record)
+    #     run_policy(env, policy, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record, results_file=args.results_file)
     elif args.dpfm_checkpoint:
         policy = DPFMModelPolicy(
             args.dpfm_checkpoint,
@@ -326,7 +338,7 @@ if __name__ == "__main__":
             execute_steps=args.dpfm_execute_steps,
             stochastic=args.dpfm_stochastic,
         )
-        run_policy(env, policy, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record)
+        run_policy(env, policy, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record, results_file=args.results_file)
     elif args.rrl_checkpoint:
         from scripts.train_residual_rl import DictConfig
         if not args.dpfm_checkpoint:
@@ -344,6 +356,6 @@ if __name__ == "__main__":
             gym_env=env,
             rrl_cfg=rrl_cfg,
         )
-        run_policy(env, policy, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record)
+        run_policy(env, policy, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record, results_file=args.results_file)
     else:
         run_random(env, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record)

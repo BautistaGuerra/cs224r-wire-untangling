@@ -5,7 +5,7 @@ import numpy as np
 import torch
 
 from scripts.train_flow_matching import load_data
-from wire_untangling.utils.normalizer import Normalizer
+from wire_untangling.utils.normalizer import Normalizer, MinMaxNormalizer
 from wire_untangling.policies.policy_inference_wrappers import DPFMModelPolicy
 from wire_untangling.policies.flow_matching_policy import FlowMatchingSchedule
 
@@ -72,7 +72,7 @@ def test_load_data_normalizes_action_chunks(tmp_path):
         grp.create_dataset("obs", data=obs)
         grp.create_dataset("actions", data=actions)
 
-    loader, state_dim, action_dim, obs_norm, action_norm = load_data(
+    loader, val_loader, state_dim, action_dim, obs_norm, action_norm = load_data(
         str(path),
         chunk_size=3,
         batch_size=8,
@@ -85,7 +85,7 @@ def test_load_data_normalizes_action_chunks(tmp_path):
     assert states.shape[1] == 2
     assert chunks.shape[1] == 6
     assert isinstance(obs_norm, Normalizer)
-    assert isinstance(action_norm, Normalizer)
+    assert isinstance(action_norm, (Normalizer, MinMaxNormalizer))
     assert abs(float(states.mean())) < 2.0
     assert abs(float(chunks.mean())) < 2.0
 

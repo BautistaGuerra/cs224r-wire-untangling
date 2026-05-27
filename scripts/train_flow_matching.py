@@ -8,7 +8,11 @@ from torch.utils.data import DataLoader, TensorDataset
 import torch
 
 from wire_untangling.policies.flow_matching_policy import FlowMatchingPolicy, flow_matching_loss
-from wire_untangling.utils.normalizer import Normalizer, DEFAULT_SCALE_OBSERVATIONS, DEFAULT_SCALE_ACTIONS
+from wire_untangling.utils.normalizer import (
+    Normalizer, DEFAULT_SCALE_OBSERVATIONS, DEFAULT_SCALE_ACTIONS,
+    obs_normalize_dims, action_normalize_dims,
+    create_normalizer_from_data, NORM_ZSCORE, NORM_MINMAX, NORM_IDENTITY,
+)
 import scripts.rrl_env_creation as rrl_env
 
 def load_config(
@@ -36,7 +40,8 @@ def make_action_bounds(config: dict) -> tuple[np.ndarray, np.ndarray]:
         raw_env.close()
 
 
-def train(config: dict, demos_path: str, seed: int = None, use_wandb: bool = True, checkpoint_dir: str = "checkpoints"):
+def train(config: dict, demos_path: str, seed: int = None, use_wandb: bool = True,
+          checkpoint_dir: str = "checkpoints", action_normalizer_type: str = "zscore"):
     dpfm_cfg = config.get("dpfm", {})
     train_cfg = config.get("dpfm_train", {})
 
@@ -51,14 +56,19 @@ def train(config: dict, demos_path: str, seed: int = None, use_wandb: bool = Tru
     lr = float(train_cfg.get("lr", 1e-4))
 
     chunk_size = int(dpfm_cfg.get("action_chunk_horizon", 20))
-    execute_steps = int(dpfm_cfg.get("execute_steps", max(1, chunk_size // 2)))
+    execute_steps = int(dpfm_cfg.get("execute_steps", FlowMatchingPolicy.default_execute_steps(chunk_size)))
+    num_sticks = int(config.get("env", {}).get("num_sticks", 1))
+    val_fraction = float(train_cfg.get("val_fraction", 0.1))
     action_low, action_high = make_action_bounds(config)
-    loader, state_dim, action_dim, obs_norm, action_norm = load_data(
+    train_loader, val_loader, state_dim, action_dim, obs_norm, action_norm = load_data(
         demos_path,
         chunk_size=chunk_size,
         batch_size=batch_size,
         action_low=action_low,
         action_high=action_high,
+        num_sticks=num_sticks,
+        val_fraction=val_fraction,
+        action_normalizer_type=action_normalizer_type,
     )
 
     os.makedirs(checkpoint_dir, exist_ok=True)
@@ -90,7 +100,8 @@ def train(config: dict, demos_path: str, seed: int = None, use_wandb: bool = Tru
     for epoch in range(epochs):
         total_loss = 0.0
         n = 0
-        for s_batch, a_batch in loader:
+        # Train epoch
+        for s_batch, a_batch in train_loader:
             s_batch = s_batch.to(device)
             a_batch = a_batch.to(device)
             loss = flow_matching_loss(policy, s_batch, a_batch)
@@ -101,9 +112,29 @@ def train(config: dict, demos_path: str, seed: int = None, use_wandb: bool = Tru
             n += s_batch.size(0)
 
         avg_loss = total_loss / n
-        print(f"  Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.6f}")
+        log_msg = f"  Epoch {epoch+1}/{epochs}, train_loss: {avg_loss:.6f}"
+        log_dict = {"epoch": epoch + 1, "train_loss": avg_loss}
+
+        # Validation loss. Inference is pretty quick, so do evaluation every epoch
+        if val_loader is not None:
+            policy.eval()
+            val_total = 0.0
+            val_n = 0
+            with torch.no_grad():
+                for s_batch, a_batch in val_loader:
+                    s_batch = s_batch.to(device)
+                    a_batch = a_batch.to(device)
+                    val_loss = flow_matching_loss(policy, s_batch, a_batch)
+                    val_total += val_loss.item() * s_batch.size(0)
+                    val_n += s_batch.size(0)
+            avg_val_loss = val_total / val_n
+            log_msg += f", val_loss: {avg_val_loss:.6f}"
+            log_dict["val_loss"] = avg_val_loss
+            policy.train()
+
+        print(log_msg)
         if run is not None:
-            wandb.log({"epoch": epoch + 1, "loss": avg_loss})
+            wandb.log(log_dict)
 
     save_path = os.path.join(checkpoint_dir, "flow_matching_policy.pt")
     torch.save({
@@ -112,7 +143,6 @@ def train(config: dict, demos_path: str, seed: int = None, use_wandb: bool = Tru
         "action_dim": action_dim,
         "pred_horizon": chunk_size,
         "execute_steps": execute_steps,
-        # TODO(alexta): rename to num_integration_steps
         "num_integration_steps": int(dpfm_cfg.get("integration_steps", 10)),
         "obs_norm": obs_norm.state_dict(),
         "action_norm": action_norm.state_dict(),
@@ -120,9 +150,10 @@ def train(config: dict, demos_path: str, seed: int = None, use_wandb: bool = Tru
     print(f"Model saved to {save_path}")
 
     if run is not None:
-        artifact = wandb.Artifact("flow-matching-policy", type="model")
-        artifact.add_file(save_path)
-        run.log_artifact(artifact)
+        # For now, disable saving the network in the WanDB. It takes a huge amount of space there.
+        # artifact = wandb.Artifact("flow-matching-policy", type="model")
+        # artifact.add_file(save_path)
+        # run.log_artifact(artifact)
         run.finish()
 
 
@@ -167,7 +198,10 @@ def load_data(
     shuffle: bool = True,
     action_low: np.ndarray | None = None,
     action_high: np.ndarray | None = None,
-) -> tuple[DataLoader, int, int, Normalizer, Normalizer]:
+    num_sticks: int = 1,
+    val_fraction: float = 0.0,
+    action_normalizer_type: str = "minmax",
+):
     """Load demos from HDF5, window actions into chunks.
 
     For each timestep t, produces (s_t, [a_t, ..., a_{t+C-1}]). When the
@@ -175,8 +209,14 @@ def load_data(
     the chunk (same padding strategy as diffusion_policy's SequenceSampler).
 
     Observations and action chunks are z-score normalized using dataset stats.
+    Normalizers are always fit on the TRAINING split only.
 
-    Returns (dataloader, state_dim, action_dim, obs_normalizer, action_normalizer).
+    Args:
+        val_fraction: Fraction of episodes to hold out for validation (0.0 = no val set).
+            Split is done at the episode level, not timestep level.
+
+    Returns (train_loader, val_loader, state_dim, action_dim, obs_normalizer, action_normalizer).
+    val_loader is None if val_fraction == 0.
     """
     import h5py
 
@@ -193,42 +233,81 @@ def load_data(
             all_actions.append(actions)
             episode_lengths.append(len(obs))
 
+    num_episodes = len(all_obs)
     state_dim = all_obs[0].shape[1]
     action_dim = all_actions[0].shape[1]
     for i, (obs, act) in enumerate(zip(all_obs, all_actions)):
         assert obs.shape[1] == state_dim, f"Demo {i}: obs_dim={obs.shape[1]} != {state_dim}"
         assert act.shape[1] == action_dim, f"Demo {i}: action_dim={act.shape[1]} != {action_dim}"
 
-    flat_obs = np.concatenate(all_obs, axis=0)
-    flat_actions = np.concatenate(all_actions, axis=0)
+    # Split episodes into train/val
+    num_val = int(num_episodes * val_fraction)
+    num_train = num_episodes - num_val
+    # Shuffle episode indices for random split
+    ep_indices = np.random.permutation(num_episodes)
+    train_indices = sorted(ep_indices[:num_train])
+    val_indices = sorted(ep_indices[num_train:]) if num_val > 0 else []
 
-    # Initialize the normalizer from data
-    obs_norm = Normalizer.from_data(flat_obs, default_scale=DEFAULT_SCALE_OBSERVATIONS)
-    action_norm = Normalizer.from_data(flat_actions, clip_low=action_low, clip_high=action_high,
-                                       default_scale=DEFAULT_SCALE_ACTIONS)
+    # Fit normalizers on training episodes only
+    train_obs = [all_obs[i] for i in train_indices]
+    train_actions = [all_actions[i] for i in train_indices]
+    flat_train_obs = np.concatenate(train_obs, axis=0)
+    flat_train_actions = np.concatenate(train_actions, axis=0)
 
-    episode_ends = np.cumsum(episode_lengths)
-    indices = create_chunk_indices(episode_ends, chunk_size, pad_after=chunk_size - 1)
+    obs_norm = Normalizer.from_data(flat_train_obs, default_scale=DEFAULT_SCALE_OBSERVATIONS,
+                                    normalize_dims=obs_normalize_dims(num_sticks))
 
-    chunked_states = []
-    chunked_actions = []
-    for buf_start, buf_end, samp_start, samp_end in indices:
-        state = obs_norm.normalize(flat_obs[buf_start])
+    action_ndims = action_normalize_dims(action_dim)
+    action_norm = create_normalizer_from_data(
+        action_normalizer_type, flat_train_actions,
+        normalize_dims=action_ndims,
+        default_scale=DEFAULT_SCALE_ACTIONS,
+        clip_low=action_low, clip_high=action_high,
+    )
 
-        action_chunk = np.zeros((chunk_size, action_dim), dtype=np.float32)
-        action_slice = flat_actions[buf_start:buf_end]
-        action_chunk[samp_start:samp_end] = action_slice
-        if samp_end < chunk_size:
-            action_chunk[samp_end:] = action_slice[-1]
-        action_chunk = action_norm.normalize(action_chunk)
+    def _build_loader(ep_idxs: np.ndarray, all_obs: np.ndarray, all_actions: np.ndarray,
+                      episode_lengths, shuffle:bool=True):
+        """Build a DataLoader from a subset of episodes.
 
-        chunked_states.append(state)
-        chunked_actions.append(action_chunk.flatten())
+        Args:
+            ep_idxs: indices of the episodes that constitute this data loader (separate for train and eval)
+            all_obs, all_actions: numpy arrays of actions / observations
+        """
+        subset_obs = [all_obs[i] for i in ep_idxs]
+        subset_actions = [all_actions[i] for i in ep_idxs]
+        subset_lengths = [episode_lengths[i] for i in ep_idxs]
 
-    s_tensor = torch.tensor(np.array(chunked_states), dtype=torch.float32)
-    a_tensor = torch.tensor(np.array(chunked_actions), dtype=torch.float32)
-    loader = DataLoader(TensorDataset(s_tensor, a_tensor), batch_size=batch_size, shuffle=shuffle)
-    return loader, state_dim, action_dim, obs_norm, action_norm
+        flat_obs = np.concatenate(subset_obs, axis=0)
+        flat_actions = np.concatenate(subset_actions, axis=0)
+        episode_ends = np.cumsum(subset_lengths)
+        indices = create_chunk_indices(episode_ends, chunk_size, pad_after=chunk_size - 1)
+
+        chunked_states = []
+        chunked_actions = []
+        for buf_start, buf_end, samp_start, samp_end in indices:
+            state = obs_norm.normalize(flat_obs[buf_start])
+
+            action_chunk = np.zeros((chunk_size, action_dim), dtype=np.float32)
+            action_slice = flat_actions[buf_start:buf_end]
+            action_chunk[samp_start:samp_end] = action_slice
+            if samp_end < chunk_size:
+                action_chunk[samp_end:] = action_slice[-1]
+            naction_chunk = action_norm.normalize(action_chunk)
+
+            chunked_states.append(state)
+            chunked_actions.append(naction_chunk.flatten())
+
+        s_tensor = torch.tensor(np.array(chunked_states), dtype=torch.float32)
+        a_tensor = torch.tensor(np.array(chunked_actions), dtype=torch.float32)
+        return DataLoader(TensorDataset(s_tensor, a_tensor), batch_size=batch_size, shuffle=shuffle)
+
+    train_loader = _build_loader(train_indices, all_obs, all_actions, episode_lengths, shuffle=shuffle)
+    val_loader = None
+    if val_indices:
+        val_loader = _build_loader(val_indices, all_obs, all_actions, episode_lengths, shuffle=False)
+        print(f"Train/val split: {num_train} train, {num_val} val episodes")
+
+    return train_loader, val_loader, state_dim, action_dim, obs_norm, action_norm
 
 def main():
     parser = argparse.ArgumentParser()
@@ -236,14 +315,30 @@ def main():
     parser.add_argument("--dpfm-config", default="configs/flow_matching.yaml")
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--no-wandb", action="store_true")
+    parser.add_argument("--action-normalizer", choices=[NORM_ZSCORE, NORM_MINMAX, NORM_IDENTITY],
+                        default=NORM_MINMAX, help="Type of action normalizer (default: minmax)")
     parser.add_argument("--checkpoint-dir", default="checkpoints/flow_matching")
     parser.add_argument("--demos-path", default="data/demos.hdf5")
+    parser.add_argument("--action-chunk-horizon", type=int, default=None,
+                        help="Override action chunk horizon from config")
+    parser.add_argument("--execute-steps", type=int, default=None,
+                        help="Override execute steps from config")
+    parser.add_argument("--integration-steps", type=int, default=None,
+                        help="Override number of flow matching integration steps from config")
     args = parser.parse_args()
 
     cfg = load_config(args.env_config, args.dpfm_config)
 
-    # seed = args.seed if args.seed is not None else cfg.get("training", {}).get("seed", 42)
-    train(cfg, demos_path=args.demos_path, seed=args.seed, use_wandb=not args.no_wandb, checkpoint_dir=args.checkpoint_dir)
+    # CLI overrides for DPFM hyperparams
+    if args.action_chunk_horizon is not None:
+        cfg.setdefault("dpfm", {})["action_chunk_horizon"] = args.action_chunk_horizon
+    if args.execute_steps is not None:
+        cfg.setdefault("dpfm", {})["execute_steps"] = args.execute_steps
+    if args.integration_steps is not None:
+        cfg.setdefault("dpfm", {})["integration_steps"] = args.integration_steps
+
+    train(cfg, demos_path=args.demos_path, seed=args.seed, use_wandb=not args.no_wandb,
+          checkpoint_dir=args.checkpoint_dir, action_normalizer_type=args.action_normalizer)
 
 
 if __name__ == "__main__":

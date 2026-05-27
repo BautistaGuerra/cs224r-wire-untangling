@@ -211,3 +211,11 @@ python scripts/play_env.py --record videos/slow.mp4 --expert --fps 10
 ```
 
 Requires `imageio` and `imageio-ffmpeg` (included in `environment.yml`).
+
+### Train the DPFM policy:
+
+Training:
+```python -m scripts.train_flow_matching```
+
+Inference:
+```python -m scripts.play_env  --dpfm_checkpoint checkpoints/flow_matching/flow_matching_policy.pt --num-sticks 1 --episodes 100```

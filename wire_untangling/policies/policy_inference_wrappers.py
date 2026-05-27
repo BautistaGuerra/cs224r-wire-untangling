@@ -7,7 +7,7 @@ from stable_baselines3 import SAC
 from wire_untangling.policies.mlp_bc import MLPBCPolicy
 from wire_untangling.policies.flow_matching_policy import FlowMatchingPolicy
 from wire_untangling.policies.rl.agent import TD3Agent
-from wire_untangling.utils.normalizer import Normalizer
+from wire_untangling.utils.normalizer import Normalizer, MinMaxNormalizer, IdentityNormalizer, load_normalizer
 from wire_untangling.policies import PickPlaceExpertPolicy, build_obs_index_map
 
 
@@ -125,7 +125,7 @@ class MLPBCModelPolicy(ModelPolicy):
 
 
 class DPFMModelPolicy(ModelPolicy):
-    def __init__(self, model_path: str, gym_env, execute_steps: int | None = None, stochastic: bool = False):
+    def __init__(self, model_path: str, gym_env, execute_steps: int | None = None, stochastic: bool = True):
         super().__init__(model_path, gym_env)
         self.gym_env = gym_env
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -137,15 +137,20 @@ class DPFMModelPolicy(ModelPolicy):
         self.num_integration_steps = int(checkpoint["num_integration_steps"])
         self.execute_steps = int(
             execute_steps if execute_steps is not None
-            else checkpoint.get("execute_steps", max(1, self.pred_horizon // 2))
+            else checkpoint.get("execute_steps", FlowMatchingPolicy.default_execute_steps(self.pred_horizon))
         )
         self.execute_steps = max(1, min(self.execute_steps, self.pred_horizon))
         self.stochastic = stochastic
 
+        print(f'Integration steps: {self.num_integration_steps}')
+        print(f'Prediction horizon: {self.pred_horizon}')
+        print(f'Execution steps: {self.execute_steps}')
+        print(f'Stochastic: {self.stochastic}')
+
         assert "obs_norm" in checkpoint
         self.obs_norm = Normalizer.from_state_dict(checkpoint["obs_norm"])
         assert "action_norm" in checkpoint
-        self.action_norm = Normalizer.from_state_dict(checkpoint["action_norm"])
+        self.action_norm = load_normalizer(checkpoint["action_norm"])
 
         self.model = FlowMatchingPolicy(
             state_dim=self.state_dim,

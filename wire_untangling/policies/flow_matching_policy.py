@@ -94,8 +94,11 @@ class ConditionalResidualBlock1D(nn.Module):
 
 class ConditionalUnet1D(nn.Module):
     def __init__(self, input_dim, global_cond_dim,
-                 diffusion_step_embed_dim=32,
-                 down_dims=(32, 64), kernel_size=5, n_groups=8):
+                 # diffusion_step_embed_dim=32,
+                 # down_dims=(32, 64),
+                 diffusion_step_embed_dim=256,
+                 down_dims=(256, 512, 1024),
+                 kernel_size=5, n_groups=8):
         super().__init__()
         all_dims = [input_dim] + list(down_dims)
         start_dim = down_dims[0]
@@ -327,6 +330,11 @@ class FlowMatchingPolicy(nn.Module):
             device=device,
             num_integration_steps=num_integration_steps,
         )
+
+    @staticmethod
+    def default_execute_steps(pred_horizon: int) -> int:
+        """Default number of chunk actions to execute before re-planning."""
+        return max(1, pred_horizon // 2)
 
     def forward(self, noisy_action, state, timestep):
         return self.model(noisy_action, state, timestep)

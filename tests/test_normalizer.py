@@ -394,3 +394,38 @@ class TestTorch:
         out = n.normalize_torch(x)
         assert torch.isfinite(out).all()
         assert out.item() == pytest.approx(0, abs=1e-5)
+
+
+# ── normalize_dims ─────────────────────────────────────────────────────
+
+class TestNormalizeDims:
+    """Verify that normalize_dims excludes specified dimensions from normalization."""
+
+    def test_excluded_dims_pass_through(self):
+        """Dims not in normalize_dims should be unchanged by normalize/denormalize."""
+        n = Normalizer(
+            loc=np.array([10, 20, 30], dtype=np.float32),
+            scale=np.array([2, 5, 3], dtype=np.float32),
+            normalize_dims=[0, 2],
+        )
+        x = np.array([[12, 99, 33]], dtype=np.float32)
+        normed = n.normalize(x)
+        # Dim 1 is excluded: should pass through unchanged
+        assert normed[0, 1] == 99.0
+        # Dims 0, 2 are normalized
+        assert normed[0, 0] == pytest.approx((12 - 10) / 2)
+        assert normed[0, 2] == pytest.approx((33 - 30) / 3)
+        # Roundtrip
+        np.testing.assert_allclose(n.denormalize(normed), x)
+
+    def test_normalize_dims_survives_state_dict_roundtrip(self):
+        """normalize_dims should be preserved through save/load."""
+        n = Normalizer(
+            loc=np.array([1, 2, 3, 4], dtype=np.float32),
+            scale=np.array([0.5, 0.5, 0.5, 0.5], dtype=np.float32),
+            normalize_dims=[0, 1],
+        )
+        n2 = Normalizer.from_state_dict(n.state_dict())
+        assert n2.normalize_dims == [0, 1]
+        x = np.array([[1.5, 2.5, 99, 77]], dtype=np.float32)
+        np.testing.assert_allclose(n.normalize(x), n2.normalize(x))
