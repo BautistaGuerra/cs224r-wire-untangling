@@ -19,7 +19,7 @@ residual_td3:
   batch_size: 256
   replay_buffer_size: 200000
   # Number of random-action steps before learning begins (fills replay buffer)
-  learning_starts: 10000
+  learning_starts: 0
   # Discount factor for Bellman target: y = r + gamma * (1 - done) * Q_target
   gamma: 0.97
   # How many env steps between each gradient update
@@ -27,7 +27,7 @@ residual_td3:
   # Actor is updated once every this many critic updates (TD3 delayed policy update)
   actor_update_every: 3
   # Train critic only (no actor updates) for this many initial steps
-  critic_warmup_steps: 8000
+  critic_warmup_steps: 0
 
   # ── Gradient clipping ──────────────────────────────────────────────
   # Max gradient L2 norm per optimizer step

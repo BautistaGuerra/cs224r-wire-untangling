@@ -37,6 +37,11 @@ class RRLActor(nn.Module):
         )
 
         self.apply(init_actor_weights)
+        # Init final layer with near-zero weights so the residual starts near zero
+        # and the base policy runs unperturbed initially.
+        final_linear = self.policy[-2]  # last Linear, before Tanh
+        nn.init.uniform_(final_linear.weight, -1e-3, 1e-3)
+        nn.init.zeros_(final_linear.bias)
 
 
     def forward(self, obs, base_action, std):
