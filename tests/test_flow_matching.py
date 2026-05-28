@@ -4,7 +4,7 @@ import h5py
 import numpy as np
 import torch
 
-from scripts.train_flow_matching import load_data
+from scripts.train_flow_matching import CONDITIONING_PHASE_ACTIVE, load_data
 from wire_untangling.utils.normalizer import Normalizer, MinMaxNormalizer
 from wire_untangling.policies.policy_inference_wrappers import DPFMModelPolicy
 from wire_untangling.policies.flow_matching_policy import FlowMatchingSchedule
@@ -72,7 +72,7 @@ def test_load_data_normalizes_action_chunks(tmp_path):
         grp.create_dataset("obs", data=obs)
         grp.create_dataset("actions", data=actions)
 
-    loader, val_loader, state_dim, action_dim, obs_norm, action_norm = load_data(
+    loader, val_loader, state_dim, action_dim, obs_norm, action_norm, meta = load_data(
         str(path),
         chunk_size=3,
         batch_size=8,
@@ -84,10 +84,44 @@ def test_load_data_normalizes_action_chunks(tmp_path):
     assert action_dim == 2
     assert states.shape[1] == 2
     assert chunks.shape[1] == 6
+    assert meta["conditioning"] == "obs"
+    assert meta["raw_obs_dim"] == 2
     assert isinstance(obs_norm, Normalizer)
     assert isinstance(action_norm, (Normalizer, MinMaxNormalizer))
     assert abs(float(states.mean())) < 2.0
     assert abs(float(chunks.mean())) < 2.0
+
+
+def test_load_data_phase_active_appends_features(tmp_path):
+    path = tmp_path / "demos.hdf5"
+    obs = np.arange(4 * 3, dtype=np.float32).reshape(4, 3)
+    actions = np.ones((4, 2), dtype=np.float32)
+    phases = np.array([0, 1, 2, 3], dtype=np.int8)
+    active_sticks = np.array([0, 0, 1, 1], dtype=np.int8)
+    with h5py.File(path, "w") as f:
+        f.attrs["env_config"] = '{"num_sticks": 2}'
+        grp = f.create_group("data/demo_0")
+        grp.create_dataset("obs", data=obs)
+        grp.create_dataset("actions", data=actions)
+        grp.create_dataset("phase", data=phases)
+        grp.create_dataset("active_stick", data=active_sticks)
+
+    loader, _, state_dim, action_dim, obs_norm, _, meta = load_data(
+        str(path),
+        chunk_size=2,
+        batch_size=8,
+        shuffle=False,
+        conditioning=CONDITIONING_PHASE_ACTIVE,
+    )
+    states, _ = next(iter(loader))
+
+    assert state_dim == 3 + 8 + 2
+    assert action_dim == 2
+    assert states.shape[1] == state_dim
+    assert obs_norm.normalize_dims == [0, 1, 2]
+    assert meta["conditioning"] == CONDITIONING_PHASE_ACTIVE
+    assert meta["raw_obs_dim"] == 3
+    assert meta["num_sticks"] == 2
 
 
 def test_dpfm_policy_executes_chunk_before_requerying():
@@ -124,3 +158,39 @@ def test_dpfm_policy_executes_chunk_before_requerying():
     np.testing.assert_array_equal(a1, np.array([11.0, 11.5], dtype=np.float32))
     np.testing.assert_array_equal(a2, np.array([12.0, 12.5], dtype=np.float32))
     np.testing.assert_array_equal(a3, np.array([20.0, 20.5], dtype=np.float32))
+
+
+def test_dpfm_policy_phase_active_builds_conditioned_state():
+    class Tracker:
+        phase = 3
+        active_stick = 1
+
+        def __init__(self):
+            self.predict_calls = 0
+            self.reset_order = None
+
+        def predict(self, obs):
+            self.predict_calls += 1
+            return np.zeros(7, dtype=np.float32), {}
+
+        def reset(self, stick_order=None):
+            self.reset_order = stick_order
+
+    policy = DPFMModelPolicy.__new__(DPFMModelPolicy)
+    policy.conditioning = CONDITIONING_PHASE_ACTIVE
+    policy.num_phases = 8
+    policy.num_sticks = 2
+    policy._phase_tracker = Tracker()
+    policy._chunk = None
+    policy._nchunk = None
+    policy._chunk_idx = 0
+
+    state = policy._build_state(np.array([0.1, 0.2], dtype=np.float32))
+    policy.reset(stick_order=(1, 0))
+
+    assert state.shape == (12,)
+    np.testing.assert_allclose(state[:2], [0.1, 0.2])
+    assert state[2 + 3] == 1.0
+    assert state[2 + 8 + 1] == 1.0
+    assert policy._phase_tracker.predict_calls == 1
+    assert policy._phase_tracker.reset_order == (1, 0)

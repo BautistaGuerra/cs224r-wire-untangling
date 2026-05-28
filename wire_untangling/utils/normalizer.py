@@ -331,9 +331,9 @@ class MinMaxNormalizer:
         if self.normalize_dims is not None:
             mask = np.zeros(len(self.data_min), dtype=bool)
             mask[self.normalize_dims] = True
-            self.data_min[~mask] = 0.0
+            self.data_min[~mask] = -1.0
             self.data_max[~mask] = 1.0
-            self.data_range[~mask] = 1.0
+            self.data_range[~mask] = 2.0
 
         ndims = len(self.data_min)
         normed = len(self.normalize_dims) if self.normalize_dims is not None else ndims
@@ -422,9 +422,7 @@ NORM_IDENTITY = "identity"
 
 NORMALIZER_TYPES = {
     NORM_ZSCORE: Normalizer,
-    # TODO(alexta): MinMaxNormalizer results in a zero success rate in DPFM. Hihghly suspect there's a bug here.
-    # Do not use for now.
-    #NORM_MINMAX: MinMaxNormalizer,
+    NORM_MINMAX: MinMaxNormalizer,
     NORM_IDENTITY: IdentityNormalizer,
 }
 
@@ -575,7 +573,6 @@ class TruncatedNormal(pyd.Normal):
         clamped_x = torch.clamp(x, self.low + self.eps, self.high - self.eps)
         x = x - x.detach() + clamped_x.detach()
         return x
-
     def sample(self, clip=None, sample_shape=None):
         if sample_shape is None:
             sample_shape = torch.Size()
@@ -594,5 +591,3 @@ class TruncatedNormal(pyd.Normal):
             # Not used currently
             x = clip_action_norm(x, self.max_action_norm)
         return x
-
-

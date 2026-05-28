@@ -36,8 +36,16 @@ from robosuite.wrappers import GymWrapper
 
 from wire_untangling.envs import StickReorderEnv
 from wire_untangling.policies import PickPlaceExpertPolicy, build_obs_index_map
+from wire_untangling.utils.stick_order import StickOrderScheduler
 
-from wire_untangling.policies.policy_inference_wrappers import ModelPolicy, MLPBCModelPolicy, DPFMModelPolicy, ResidualRLPolicy
+from wire_untangling.policies.policy_inference_wrappers import (
+    DPFMModelPolicy,
+    MLPBCModelPolicy,
+    ModelPolicy,
+    ResidualRLPolicy,
+    SACModelPolicy,
+)
+
 
 def _make_writer(path: str, fps: int):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -103,6 +111,7 @@ def make_env(
         **kwargs,
     )
 
+
 def run_random(env, n_episodes: int = 2, render: bool = False, fps: int = 20, record_path: str = None):
     sleep_time = 1.0 / fps if render else 0.0
     writer = _make_writer(record_path, fps) if record_path else None
@@ -139,21 +148,36 @@ def run_random(env, n_episodes: int = 2, render: bool = False, fps: int = 20, re
     env.close()
 
 
-def run_policy(env, policy:ModelPolicy, n_episodes: int = 2, render: bool = False, fps: int = 20, record_path: str = None, results_file: str = None):
+def run_policy(
+    env,
+    policy: ModelPolicy,
+    n_episodes: int = 2,
+    render: bool = False,
+    fps: int = 20,
+    record_path: str = None,
+    expert_cfg: dict | None = None,
+    results_file: str = None,
+):
     """Run a trained policy in the environment and report success rate.
     Uses GymWrapper to produce the flat obs vector the policy expects,
     while keeping the underlying Robosuite renderer active."""
     gym_env = GymWrapper(env)
+    expert_cfg = dict(expert_cfg or {})
+    order_schedule = StickOrderScheduler(expert_cfg, env.num_sticks)
     if hasattr(policy, "set_gym_env"):
-        policy.set_gym_env(gym_env)
+        policy.set_gym_env(gym_env, expert_cfg=expert_cfg)
     sleep_time = 1.0 / fps if render else 0.0
     writer = _make_writer(record_path, fps) if record_path else None
 
     successes = 0
+    successes_by_order: dict[tuple[int, ...], int] = {}
+    attempts_by_order: dict[tuple[int, ...], int] = {}
     total_rewards = []
     for ep in range(n_episodes):
+        stick_order = order_schedule.order_for(ep)
+        attempts_by_order[stick_order] = attempts_by_order.get(stick_order, 0) + 1
         obs, _ = gym_env.reset()
-        policy.reset()
+        policy.reset(stick_order=stick_order)
         total_reward = 0.0
         done = False
         step = 0
@@ -178,13 +202,27 @@ def run_policy(env, policy:ModelPolicy, n_episodes: int = 2, render: bool = Fals
 
         success = info.get("is_success", False)
         successes += int(success)
+        if success:
+            successes_by_order[stick_order] = successes_by_order.get(stick_order, 0) + 1
         total_rewards.append(total_reward)
-        print(f"Episode {ep + 1}: steps={step}  total_reward={total_reward:.3f}  success={success}")
+        print(
+            f"Episode {ep + 1}: order={StickOrderScheduler.format_order(stick_order)} "
+            f"steps={step}  total_reward={total_reward:.3f}  success={success}"
+        )
 
     mean_reward = np.mean(total_rewards)
     std_reward = np.std(total_rewards)
     success_rate = successes / n_episodes
     print(f"\nSuccess rate: {successes}/{n_episodes} ({success_rate:.0%})")
+    print("Per-order success:")
+    for order in order_schedule.order_choices:
+        order_successes = successes_by_order.get(order, 0)
+        order_attempts = attempts_by_order.get(order, 0)
+        order_rate = order_successes / order_attempts if order_attempts else 0.0
+        print(
+            f"  {StickOrderScheduler.format_order(order)}: "
+            f"{order_successes}/{order_attempts} ({order_rate:.0%})"
+        )
     print(f"Reward: {mean_reward:.3f} ± {std_reward:.3f}")
 
     if results_file:
@@ -215,18 +253,23 @@ def run_expert(
     gym_env = GymWrapper(env)
     obs_map = build_obs_index_map(gym_env)
     expert_cfg = dict(expert_cfg or {})
+    order_schedule = StickOrderScheduler(expert_cfg, env.num_sticks)
     expert = PickPlaceExpertPolicy(
         obs_map,
         goal_yaw=getattr(env, "goal_yaw", 0.0),
-        stick_order=expert_cfg.get("stick_order"),
+        stick_order=order_schedule.order_for(0),
     )
     sleep_time = 1.0 / fps if render else 0.0
     writer = _make_writer(record_path, fps) if record_path else None
 
     successes = 0
+    successes_by_order: dict[tuple[int, ...], int] = {}
+    attempts_by_order: dict[tuple[int, ...], int] = {}
     for ep in range(n_episodes):
+        stick_order = order_schedule.order_for(ep)
+        attempts_by_order[stick_order] = attempts_by_order.get(stick_order, 0) + 1
         obs, _ = gym_env.reset()
-        expert.reset()
+        expert.reset(stick_order=stick_order)
         total_reward = 0.0
         done = False
         step = 0
@@ -251,9 +294,24 @@ def run_expert(
 
         success = info.get("is_success", False)
         successes += int(success)
-        print(f"Episode {ep + 1}: steps={step}  total_reward={total_reward:.3f}  success={success}  phase={expert._phase.name}")
+        if success:
+            successes_by_order[stick_order] = successes_by_order.get(stick_order, 0) + 1
+        print(
+            f"Episode {ep + 1}: order={StickOrderScheduler.format_order(stick_order)} "
+            f"steps={step}  total_reward={total_reward:.3f}  "
+            f"success={success}  phase={expert._phase.name}"
+        )
 
     print(f"\nSuccess rate: {successes}/{n_episodes} ({successes/n_episodes:.0%})")
+    print("Per-order success:")
+    for order in order_schedule.order_choices:
+        order_successes = successes_by_order.get(order, 0)
+        order_attempts = attempts_by_order.get(order, 0)
+        order_rate = order_successes / order_attempts if order_attempts else 0.0
+        print(
+            f"  {StickOrderScheduler.format_order(order)}: "
+            f"{order_successes}/{order_attempts} ({order_rate:.0%})"
+        )
     if writer:
         writer.close()
         print(f"Video saved to {record_path}")
@@ -286,8 +344,10 @@ if __name__ == "__main__":
                         help="Path to .pth checkpoint for trained DPFM policy")
     parser.add_argument("--dpfm-execute-steps", type=int, default=None,
                         help="Override DPFM chunk actions executed before re-planning")
-    parser.add_argument("--dpfm-stochastic", action="store_true", default=True,
+    parser.add_argument("--dpfm-stochastic", dest="dpfm_stochastic", action="store_true", default=True,
                         help="Use random Flow Matching initial noise instead of deterministic zero-noise sampling")
+    parser.add_argument("--dpfm-deterministic", dest="dpfm_stochastic", action="store_false",
+                        help="Use zero initial noise for deterministic Flow Matching sampling")
     parser.add_argument("--rrl-checkpoint", type=str, default=None,
                         help="Path to residual RL (TD3) checkpoint (.pt)")
     parser.add_argument("--rrl-config", type=str, default="configs/residual_td3.yaml",
@@ -327,25 +387,40 @@ if __name__ == "__main__":
         )
     elif args.bc_checkpoint:
         policy = MLPBCModelPolicy(args.bc_checkpoint, env)
-        run_policy(env, policy, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record, results_file=args.results_file)
-    # elif args.sac_checkpoint:
-    #     policy = SACModelPolicy(args.sac_checkpoint, env)
-    #     run_policy(env, policy, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record, results_file=args.results_file)
-    elif args.dpfm_checkpoint:
-        policy = DPFMModelPolicy(
-            args.dpfm_checkpoint,
+        run_policy(
             env,
-            execute_steps=args.dpfm_execute_steps,
-            stochastic=args.dpfm_stochastic,
+            policy,
+            n_episodes=args.episodes,
+            render=args.render,
+            fps=args.fps,
+            record_path=args.record,
+            expert_cfg=expert_cfg,
+            results_file=args.results_file,
         )
-        run_policy(env, policy, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record, results_file=args.results_file)
+    elif args.sac_checkpoint:
+        policy = SACModelPolicy(args.sac_checkpoint, env)
+        run_policy(
+            env,
+            policy,
+            n_episodes=args.episodes,
+            render=args.render,
+            fps=args.fps,
+            record_path=args.record,
+            expert_cfg=expert_cfg,
+            results_file=args.results_file,
+        )
     elif args.rrl_checkpoint:
         from scripts.train_residual_rl import DictConfig
         if not args.dpfm_checkpoint:
             parser.error("--rrl-checkpoint requires --dpfm_checkpoint (the base DPFM policy)")
         with open(args.rrl_config) as f:
             rrl_raw = yaml.safe_load(f).get("residual_td3", {})
-        base_policy = DPFMModelPolicy(args.dpfm_checkpoint, env, stochastic=args.dpfm_stochastic)
+        base_policy = DPFMModelPolicy(
+            args.dpfm_checkpoint,
+            env,
+            execute_steps=args.dpfm_execute_steps,
+            stochastic=args.dpfm_stochastic,
+        )
         rrl_raw["state_dim"] = (int(base_policy.state_dim),)
         rrl_raw["action_dim"] = (int(base_policy.action_dim),)
         rrl_cfg = DictConfig(rrl_raw)
@@ -356,6 +431,32 @@ if __name__ == "__main__":
             gym_env=env,
             rrl_cfg=rrl_cfg,
         )
-        run_policy(env, policy, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record, results_file=args.results_file)
+        run_policy(
+            env,
+            policy,
+            n_episodes=args.episodes,
+            render=args.render,
+            fps=args.fps,
+            record_path=args.record,
+            expert_cfg=expert_cfg,
+            results_file=args.results_file,
+        )
+    elif args.dpfm_checkpoint:
+        policy = DPFMModelPolicy(
+            args.dpfm_checkpoint,
+            env,
+            execute_steps=args.dpfm_execute_steps,
+            stochastic=args.dpfm_stochastic,
+        )
+        run_policy(
+            env,
+            policy,
+            n_episodes=args.episodes,
+            render=args.render,
+            fps=args.fps,
+            record_path=args.record,
+            expert_cfg=expert_cfg,
+            results_file=args.results_file,
+        )
     else:
         run_random(env, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record)

@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 import torch
 
-from wire_untangling.utils.normalizer import Normalizer
+from wire_untangling.utils.normalizer import MinMaxNormalizer, Normalizer, load_normalizer
 
 
 # ── from_data stats ──────────────────────────────────────────────────────
@@ -429,3 +429,28 @@ class TestNormalizeDims:
         assert n2.normalize_dims == [0, 1]
         x = np.array([[1.5, 2.5, 99, 77]], dtype=np.float32)
         np.testing.assert_allclose(n.normalize(x), n2.normalize(x))
+
+
+class TestMinMaxNormalizer:
+    """Verify min-max normalizer loading and excluded-dim behavior."""
+
+    def test_excluded_dims_roundtrip_as_identity(self):
+        data = np.array(
+            [
+                [-2.0, -1.0],
+                [2.0, 1.0],
+            ],
+            dtype=np.float32,
+        )
+        n = MinMaxNormalizer.from_data(data, normalize_dims=[0])
+        x = np.array([[1.0, -1.0], [-1.0, 1.0]], dtype=np.float32)
+        np.testing.assert_allclose(n.denormalize(n.normalize(x)), x)
+        np.testing.assert_allclose(n.normalize(x)[:, 1], x[:, 1])
+
+    def test_load_normalizer_dispatches_minmax(self):
+        data = np.array([[-2.0, -1.0], [2.0, 1.0]], dtype=np.float32)
+        n = MinMaxNormalizer.from_data(data)
+        loaded = load_normalizer(n.state_dict())
+        assert isinstance(loaded, MinMaxNormalizer)
+        x = np.array([[0.5, -0.5]], dtype=np.float32)
+        np.testing.assert_allclose(loaded.denormalize(loaded.normalize(x)), x)

@@ -7,7 +7,8 @@ from stable_baselines3 import SAC
 from wire_untangling.policies.mlp_bc import MLPBCPolicy
 from wire_untangling.policies.flow_matching_policy import FlowMatchingPolicy
 from wire_untangling.policies.rl.agent import TD3Agent
-from wire_untangling.utils.normalizer import Normalizer, MinMaxNormalizer, IdentityNormalizer, load_normalizer
+from wire_untangling.utils.normalizer import Normalizer, load_normalizer
+from wire_untangling.utils.stick_order import StickOrderScheduler
 from wire_untangling.policies import PickPlaceExpertPolicy, build_obs_index_map
 
 
@@ -30,7 +31,7 @@ class ModelPolicy(object):
     def predict(self, obs:torch.Tensor) -> torch.Tensor:
         pass
 
-    def reset(self):
+    def reset(self, stick_order=None):
         pass
 
 
@@ -76,13 +77,21 @@ class MLPBCModelPolicy(ModelPolicy):
         assert "obs_norm" in ckpt
         self.obs_norm = Normalizer.from_state_dict(ckpt["obs_norm"])
 
-    def set_gym_env(self, gym_env):
+    def set_gym_env(self, gym_env, expert_cfg: dict | None = None):
         if self.conditioning != "phase-active":
             return
+        env_num_sticks = int(getattr(gym_env.env, "num_sticks", self.num_sticks))
+        if env_num_sticks != self.num_sticks:
+            raise ValueError(
+                f"Checkpoint expects num_sticks={self.num_sticks}, "
+                f"but env has num_sticks={env_num_sticks}"
+            )
+        order_schedule = StickOrderScheduler(expert_cfg, self.num_sticks)
         obs_map = build_obs_index_map(gym_env)
         self._phase_tracker = PickPlaceExpertPolicy(
             obs_map,
             goal_yaw=self.goal_yaw,
+            stick_order=order_schedule.order_for(0),
         )
 
     def _build_state(self, obs: np.ndarray) -> np.ndarray:
@@ -119,9 +128,9 @@ class MLPBCModelPolicy(ModelPolicy):
             action = self.model(normed)[0]
         return action.cpu().numpy()
 
-    def reset(self):
+    def reset(self, stick_order=None):
         if self._phase_tracker is not None:
-            self._phase_tracker.reset()
+            self._phase_tracker.reset(stick_order=stick_order)
 
 
 class DPFMModelPolicy(ModelPolicy):
@@ -133,6 +142,12 @@ class DPFMModelPolicy(ModelPolicy):
         checkpoint = torch.load(model_path, map_location=self.device, weights_only=True)
         self.action_dim = int(checkpoint["action_dim"])
         self.state_dim = int(checkpoint["state_dim"])
+        self.conditioning = checkpoint.get("conditioning", "obs")
+        self.raw_obs_dim = int(checkpoint.get("raw_obs_dim", self.state_dim))
+        self.num_phases = int(checkpoint.get("num_phases", 8))
+        self.num_sticks = int(checkpoint.get("num_sticks", 1))
+        self.goal_yaw = float(getattr(gym_env, "goal_yaw", 0.0))
+        self._phase_tracker = None
         self.pred_horizon = int(checkpoint["pred_horizon"])
         self.num_integration_steps = int(checkpoint["num_integration_steps"])
         self.execute_steps = int(
@@ -167,13 +182,56 @@ class DPFMModelPolicy(ModelPolicy):
         self._nchunk = None
         self._chunk_idx = 0
 
-    def reset(self):
+    def set_gym_env(self, gym_env, expert_cfg: dict | None = None):
+        if self.conditioning != "phase-active":
+            return
+        env_num_sticks = int(getattr(gym_env.env, "num_sticks", self.num_sticks))
+        if env_num_sticks != self.num_sticks:
+            raise ValueError(
+                f"Checkpoint expects num_sticks={self.num_sticks}, "
+                f"but env has num_sticks={env_num_sticks}"
+            )
+        order_schedule = StickOrderScheduler(expert_cfg, self.num_sticks)
+        obs_map = build_obs_index_map(gym_env)
+        self._phase_tracker = PickPlaceExpertPolicy(
+            obs_map,
+            goal_yaw=self.goal_yaw,
+            stick_order=order_schedule.order_for(0),
+        )
+
+    def reset(self, stick_order=None):
         self._chunk = None
         self._nchunk = None
         self._chunk_idx = 0
+        if self._phase_tracker is not None:
+            self._phase_tracker.reset(stick_order=stick_order)
+
+    def _build_state(self, obs: np.ndarray) -> np.ndarray:
+        obs = np.asarray(obs, dtype=np.float32)
+        if self.conditioning == "obs":
+            return obs
+        if self.conditioning != "phase-active":
+            raise ValueError(f"Unsupported DPFM conditioning: {self.conditioning!r}")
+        if self._phase_tracker is None:
+            raise RuntimeError(
+                "phase-active DPFM requires a GymWrapper-backed phase tracker; "
+                "run it via run_policy/play_env so set_gym_env() is called."
+            )
+
+        phase = int(self._phase_tracker.phase)
+        active_stick = int(self._phase_tracker.active_stick)
+        self._phase_tracker.predict(obs)
+        features = make_phase_active_features(
+            phase,
+            active_stick,
+            num_phases=self.num_phases,
+            num_sticks=self.num_sticks,
+        )
+        return np.concatenate([obs, features], axis=0)
 
     def _sample_chunk(self, obs: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        obs = self.obs_norm.normalize(obs)
+        state_np = self._build_state(obs)
+        obs = self.obs_norm.normalize(state_np)
         with torch.no_grad():
             state = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
             initial_noise = None
@@ -222,23 +280,23 @@ class ResidualRLPolicy(ModelPolicy):
         checkpoint = torch.load(base_model_path, map_location=self.device, weights_only=True)
         self.action_dim = (int(checkpoint["action_dim"]))
         self.state_dim = (int(checkpoint["state_dim"]))
-        rrl_cfg.state_dim =self.state_dim
-        rrl_cfg.action_dim = self.action_dim
+        rrl_cfg.state_dim = (self.state_dim,)
+        rrl_cfg.action_dim = (self.action_dim,)
 
         rl_checkpoint = torch.load(rl_model_path, map_location=self.device, weights_only=True)
         # if "obs_norm" in checkpoint:
         assert "obs_norm" in checkpoint
         self.obs_norm = Normalizer.from_state_dict(checkpoint["obs_norm"])
         assert "action_norm" in checkpoint
-        self.action_norm = Normalizer.from_state_dict(checkpoint["action_norm"])
+        self.action_norm = load_normalizer(checkpoint["action_norm"])
 
         self.rrl_model = TD3Agent(rrl_cfg)
         self.rrl_model.load_state_dict(rl_checkpoint["model_state_dict"])
         self.rrl_model.eval()
 
 
-    def reset(self):
-        self.base_policy.reset()
+    def reset(self, stick_order=None):
+        self.base_policy.reset(stick_order=stick_order)
 
     def predict_rrl(self, obs: np.ndarray) -> np.ndarray:
         """Predicts the action using residual RL.
@@ -280,4 +338,3 @@ class ResidualRLPolicy(ModelPolicy):
         """Predict unnormalized action value, i.e. in the original policy scope. Used for rollouts."""
         action, _, _ = self.predict_rrl(obs)
         return action
-

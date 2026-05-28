@@ -10,10 +10,14 @@ import torch
 from wire_untangling.policies.flow_matching_policy import FlowMatchingPolicy, flow_matching_loss
 from wire_untangling.utils.normalizer import (
     Normalizer, DEFAULT_SCALE_OBSERVATIONS, DEFAULT_SCALE_ACTIONS,
-    obs_normalize_dims, action_normalize_dims,
+    action_normalize_dims,
     create_normalizer_from_data, NORM_ZSCORE, NORM_MINMAX, NORM_IDENTITY,
 )
-import scripts.rrl_env_creation as rrl_env
+
+
+CONDITIONING_OBS = "obs"
+CONDITIONING_PHASE_ACTIVE = "phase-active"
+NUM_PHASES = 8
 
 def load_config(
     env_config: str = "configs/stick_reorder.yaml",
@@ -27,11 +31,44 @@ def load_config(
 
 
 def make_action_bounds(config: dict) -> tuple[np.ndarray, np.ndarray]:
-    """Create the current one-stick env and return raw action bounds."""
+    """Create the configured env and return raw action bounds."""
+    from wire_untangling.envs import StickReorderEnv
 
     env_cfg = dict(config.get("env", {}))
-    env_cfg["num_sticks"] = 1
-    raw_env = rrl_env.make_rrl_gym_env_1stick(env_cfg)
+    kwargs = dict(
+        robots=env_cfg.get("robot", "Panda"),
+        num_sticks=env_cfg.get("num_sticks", 1),
+        stick_length=env_cfg.get("stick_length", 0.20),
+        stick_radius=env_cfg.get("stick_radius", 0.0075),
+        goal_spacing=env_cfg.get("goal_spacing", 0.06),
+        success_threshold=env_cfg.get("success_threshold", 0.03),
+        orientation_threshold=env_cfg.get("orientation_threshold", np.deg2rad(10.0)),
+        lambda_rot=env_cfg.get("lambda_rot", 0.1),
+        goal_yaw=env_cfg.get("goal_yaw", 0.0),
+        reward_shaping=env_cfg.get("reward_shaping", True),
+        terminate_on_success=env_cfg.get("terminate_on_success", True),
+        has_renderer=False,
+        has_offscreen_renderer=False,
+        use_camera_obs=False,
+        control_freq=20,
+        horizon=env_cfg.get("horizon", 500),
+    )
+    optional_env_keys = (
+        "placement_mode",
+        "init_x_range",
+        "init_y_range",
+        "side_init_x_range",
+        "side_init_y_ranges",
+        "side_init_yaw_range",
+        "side_goal_x",
+        "side_goal_y_ranges",
+        "stick_color_indices",
+    )
+    for key in optional_env_keys:
+        if key in env_cfg:
+            kwargs[key] = env_cfg[key]
+
+    raw_env = StickReorderEnv(**kwargs)
     try:
         low, high = raw_env.action_spec
         print(f'Environment created with action bounds. low: {low}, high: {high}')
@@ -40,8 +77,17 @@ def make_action_bounds(config: dict) -> tuple[np.ndarray, np.ndarray]:
         raw_env.close()
 
 
-def train(config: dict, demos_path: str, seed: int = None, use_wandb: bool = True,
-          checkpoint_dir: str = "checkpoints", action_normalizer_type: str = "zscore"):
+def train(
+    config: dict,
+    demos_path: str,
+    seed: int = None,
+    use_wandb: bool = True,
+    checkpoint_dir: str = "checkpoints",
+    action_normalizer_type: str = "zscore",
+    conditioning: str = CONDITIONING_OBS,
+    wandb_run_id: str | None = None,
+    wandb_name: str | None = None,
+):
     dpfm_cfg = config.get("dpfm", {})
     train_cfg = config.get("dpfm_train", {})
 
@@ -57,16 +103,15 @@ def train(config: dict, demos_path: str, seed: int = None, use_wandb: bool = Tru
 
     chunk_size = int(dpfm_cfg.get("action_chunk_horizon", 20))
     execute_steps = int(dpfm_cfg.get("execute_steps", FlowMatchingPolicy.default_execute_steps(chunk_size)))
-    num_sticks = int(config.get("env", {}).get("num_sticks", 1))
     val_fraction = float(train_cfg.get("val_fraction", 0.1))
     action_low, action_high = make_action_bounds(config)
-    train_loader, val_loader, state_dim, action_dim, obs_norm, action_norm = load_data(
+    train_loader, val_loader, state_dim, action_dim, obs_norm, action_norm, data_meta = load_data(
         demos_path,
         chunk_size=chunk_size,
         batch_size=batch_size,
         action_low=action_low,
         action_high=action_high,
-        num_sticks=num_sticks,
+        conditioning=conditioning,
         val_fraction=val_fraction,
         action_normalizer_type=action_normalizer_type,
     )
@@ -75,16 +120,26 @@ def train(config: dict, demos_path: str, seed: int = None, use_wandb: bool = Tru
 
     if use_wandb:
         import wandb
-        run = wandb.init(
-            project="cs224r-wire-untangling",
-            config={
+        wandb_kwargs = {
+            "project": "cs224r-wire-untangling",
+            "config": {
                 **config,
                 "seed": seed,
                 "state_dim": state_dim,
                 "action_dim": action_dim,
+                "conditioning": conditioning,
+                "action_normalizer": action_normalizer_type,
+                "raw_obs_dim": data_meta["raw_obs_dim"],
+                "num_phases": data_meta["num_phases"],
+                "num_sticks": data_meta["num_sticks"],
             },
-            tags=["flow-matching", "bc"],
-        )
+            "tags": ["flow-matching", "bc"],
+        }
+        if wandb_run_id:
+            wandb_kwargs.update({"id": wandb_run_id, "resume": "allow"})
+        if wandb_name:
+            wandb_kwargs["name"] = wandb_name
+        run = wandb.init(**wandb_kwargs)
     else:
         run = None
 
@@ -144,6 +199,10 @@ def train(config: dict, demos_path: str, seed: int = None, use_wandb: bool = Tru
         "pred_horizon": chunk_size,
         "execute_steps": execute_steps,
         "num_integration_steps": int(dpfm_cfg.get("integration_steps", 10)),
+        "conditioning": conditioning,
+        "raw_obs_dim": data_meta["raw_obs_dim"],
+        "num_phases": data_meta["num_phases"],
+        "num_sticks": data_meta["num_sticks"],
         "obs_norm": obs_norm.state_dict(),
         "action_norm": action_norm.state_dict(),
     }, save_path)
@@ -191,6 +250,57 @@ def create_chunk_indices(
     return np.array(indices, dtype=np.int64)
 
 
+def _decode_json_attr(value):
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        value = value.decode()
+    import json
+    return json.loads(value)
+
+
+def _infer_num_sticks(f, raw_obs_dim: int | None = None) -> int:
+    env_cfg = _decode_json_attr(f.attrs.get("env_config"))
+    if env_cfg and "num_sticks" in env_cfg:
+        return int(env_cfg["num_sticks"])
+    if raw_obs_dim is not None and raw_obs_dim >= 60:
+        inferred = (raw_obs_dim - 50) // 10
+        if 50 + 10 * inferred == raw_obs_dim and inferred > 0:
+            return int(inferred)
+
+    max_stick = -1
+    for key in f["data"].keys():
+        demo = f["data"][key]
+        if "active_stick" in demo:
+            active = demo["active_stick"][:]
+            if len(active):
+                max_stick = max(max_stick, int(active.max()))
+    return max_stick + 1 if max_stick >= 0 else 1
+
+
+def make_phase_active_features(
+    phases: np.ndarray,
+    active_sticks: np.ndarray,
+    num_sticks: int,
+    num_phases: int = NUM_PHASES,
+) -> np.ndarray:
+    phases = np.asarray(phases, dtype=np.int64)
+    active_sticks = np.asarray(active_sticks, dtype=np.int64)
+    if phases.shape != active_sticks.shape:
+        raise ValueError(
+            f"phase and active_stick shapes differ: {phases.shape} vs {active_sticks.shape}"
+        )
+    if np.any((phases < 0) | (phases >= num_phases)):
+        raise ValueError(f"phase values must be in [0, {num_phases})")
+    if np.any((active_sticks < 0) | (active_sticks >= num_sticks)):
+        raise ValueError(f"active_stick values must be in [0, {num_sticks})")
+
+    out = np.zeros((len(phases), num_phases + num_sticks), dtype=np.float32)
+    out[np.arange(len(phases)), phases] = 1.0
+    out[np.arange(len(active_sticks)), num_phases + active_sticks] = 1.0
+    return out
+
+
 def load_data(
     demo_path: str,
     chunk_size: int = 20,
@@ -198,9 +308,9 @@ def load_data(
     shuffle: bool = True,
     action_low: np.ndarray | None = None,
     action_high: np.ndarray | None = None,
-    num_sticks: int = 1,
+    conditioning: str = CONDITIONING_OBS,
     val_fraction: float = 0.0,
-    action_normalizer_type: str = "minmax",
+    action_normalizer_type: str = NORM_ZSCORE,
 ):
     """Load demos from HDF5, window actions into chunks.
 
@@ -222,9 +332,14 @@ def load_data(
 
     all_obs = []
     all_actions = []
+    all_features = []
     episode_lengths = []
     with h5py.File(demo_path, "r") as f:
         data_grp = f["data"]
+        keys = sorted(data_grp.keys())
+        first_obs = data_grp[keys[0]]["obs"][:]
+        raw_obs_dim = first_obs.shape[1]
+        num_sticks = _infer_num_sticks(f, raw_obs_dim=raw_obs_dim)
         for key in sorted(data_grp.keys()):
             demo = data_grp[key]
             obs = demo["obs"][:]
@@ -232,13 +347,39 @@ def load_data(
             all_obs.append(obs)
             all_actions.append(actions)
             episode_lengths.append(len(obs))
+            if conditioning == CONDITIONING_PHASE_ACTIVE:
+                if "phase" not in demo or "active_stick" not in demo:
+                    raise ValueError(
+                        "--conditioning phase-active requires phase and active_stick "
+                        f"datasets; missing in data/{key}"
+                    )
+                all_features.append(
+                    make_phase_active_features(
+                        demo["phase"][:],
+                        demo["active_stick"][:],
+                        num_sticks=num_sticks,
+                    )
+                )
 
     num_episodes = len(all_obs)
-    state_dim = all_obs[0].shape[1]
     action_dim = all_actions[0].shape[1]
     for i, (obs, act) in enumerate(zip(all_obs, all_actions)):
-        assert obs.shape[1] == state_dim, f"Demo {i}: obs_dim={obs.shape[1]} != {state_dim}"
+        assert obs.shape[1] == raw_obs_dim, f"Demo {i}: obs_dim={obs.shape[1]} != {raw_obs_dim}"
         assert act.shape[1] == action_dim, f"Demo {i}: action_dim={act.shape[1]} != {action_dim}"
+
+    if conditioning == CONDITIONING_OBS:
+        all_states = all_obs
+    elif conditioning == CONDITIONING_PHASE_ACTIVE:
+        all_states = [
+            np.concatenate([obs, features], axis=1)
+            for obs, features in zip(all_obs, all_features)
+        ]
+    else:
+        raise ValueError(
+            f"Unsupported conditioning={conditioning!r}; "
+            f"expected {CONDITIONING_OBS!r} or {CONDITIONING_PHASE_ACTIVE!r}"
+        )
+    state_dim = all_states[0].shape[1]
 
     # Split episodes into train/val
     num_val = int(num_episodes * val_fraction)
@@ -249,13 +390,16 @@ def load_data(
     val_indices = sorted(ep_indices[num_train:]) if num_val > 0 else []
 
     # Fit normalizers on training episodes only
-    train_obs = [all_obs[i] for i in train_indices]
+    train_states = [all_states[i] for i in train_indices]
     train_actions = [all_actions[i] for i in train_indices]
-    flat_train_obs = np.concatenate(train_obs, axis=0)
+    flat_train_states = np.concatenate(train_states, axis=0)
     flat_train_actions = np.concatenate(train_actions, axis=0)
 
-    obs_norm = Normalizer.from_data(flat_train_obs, default_scale=DEFAULT_SCALE_OBSERVATIONS,
-                                    normalize_dims=obs_normalize_dims(num_sticks))
+    obs_norm = Normalizer.from_data(
+        flat_train_states,
+        default_scale=DEFAULT_SCALE_OBSERVATIONS,
+        normalize_dims=list(range(raw_obs_dim)),
+    )
 
     action_ndims = action_normalize_dims(action_dim)
     action_norm = create_normalizer_from_data(
@@ -265,19 +409,19 @@ def load_data(
         clip_low=action_low, clip_high=action_high,
     )
 
-    def _build_loader(ep_idxs: np.ndarray, all_obs: np.ndarray, all_actions: np.ndarray,
+    def _build_loader(ep_idxs: np.ndarray, all_states: list[np.ndarray], all_actions: list[np.ndarray],
                       episode_lengths, shuffle:bool=True):
         """Build a DataLoader from a subset of episodes.
 
         Args:
             ep_idxs: indices of the episodes that constitute this data loader (separate for train and eval)
-            all_obs, all_actions: numpy arrays of actions / observations
+            all_states, all_actions: numpy arrays of states / actions
         """
-        subset_obs = [all_obs[i] for i in ep_idxs]
+        subset_states = [all_states[i] for i in ep_idxs]
         subset_actions = [all_actions[i] for i in ep_idxs]
         subset_lengths = [episode_lengths[i] for i in ep_idxs]
 
-        flat_obs = np.concatenate(subset_obs, axis=0)
+        flat_states = np.concatenate(subset_states, axis=0)
         flat_actions = np.concatenate(subset_actions, axis=0)
         episode_ends = np.cumsum(subset_lengths)
         indices = create_chunk_indices(episode_ends, chunk_size, pad_after=chunk_size - 1)
@@ -285,7 +429,7 @@ def load_data(
         chunked_states = []
         chunked_actions = []
         for buf_start, buf_end, samp_start, samp_end in indices:
-            state = obs_norm.normalize(flat_obs[buf_start])
+            state = obs_norm.normalize(flat_states[buf_start])
 
             action_chunk = np.zeros((chunk_size, action_dim), dtype=np.float32)
             action_slice = flat_actions[buf_start:buf_end]
@@ -301,13 +445,19 @@ def load_data(
         a_tensor = torch.tensor(np.array(chunked_actions), dtype=torch.float32)
         return DataLoader(TensorDataset(s_tensor, a_tensor), batch_size=batch_size, shuffle=shuffle)
 
-    train_loader = _build_loader(train_indices, all_obs, all_actions, episode_lengths, shuffle=shuffle)
+    train_loader = _build_loader(train_indices, all_states, all_actions, episode_lengths, shuffle=shuffle)
     val_loader = None
     if val_indices:
-        val_loader = _build_loader(val_indices, all_obs, all_actions, episode_lengths, shuffle=False)
+        val_loader = _build_loader(val_indices, all_states, all_actions, episode_lengths, shuffle=False)
         print(f"Train/val split: {num_train} train, {num_val} val episodes")
 
-    return train_loader, val_loader, state_dim, action_dim, obs_norm, action_norm
+    meta = {
+        "conditioning": conditioning,
+        "raw_obs_dim": raw_obs_dim,
+        "num_phases": NUM_PHASES,
+        "num_sticks": num_sticks,
+    }
+    return train_loader, val_loader, state_dim, action_dim, obs_norm, action_norm, meta
 
 def main():
     parser = argparse.ArgumentParser()
@@ -316,15 +466,19 @@ def main():
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--no-wandb", action="store_true")
     parser.add_argument("--action-normalizer", choices=[NORM_ZSCORE, NORM_MINMAX, NORM_IDENTITY],
-                        default=NORM_MINMAX, help="Type of action normalizer (default: minmax)")
+                        default=NORM_ZSCORE, help="Type of action normalizer (default: zscore)")
     parser.add_argument("--checkpoint-dir", default="checkpoints/flow_matching")
     parser.add_argument("--demos-path", default="data/demos.hdf5")
+    parser.add_argument("--conditioning", choices=[CONDITIONING_OBS, CONDITIONING_PHASE_ACTIVE],
+                        default=CONDITIONING_OBS)
     parser.add_argument("--action-chunk-horizon", type=int, default=None,
                         help="Override action chunk horizon from config")
     parser.add_argument("--execute-steps", type=int, default=None,
                         help="Override execute steps from config")
     parser.add_argument("--integration-steps", type=int, default=None,
                         help="Override number of flow matching integration steps from config")
+    parser.add_argument("--wandb-run-id", default=None)
+    parser.add_argument("--wandb-name", default=None)
     args = parser.parse_args()
 
     cfg = load_config(args.env_config, args.dpfm_config)
@@ -338,7 +492,9 @@ def main():
         cfg.setdefault("dpfm", {})["integration_steps"] = args.integration_steps
 
     train(cfg, demos_path=args.demos_path, seed=args.seed, use_wandb=not args.no_wandb,
-          checkpoint_dir=args.checkpoint_dir, action_normalizer_type=args.action_normalizer)
+          checkpoint_dir=args.checkpoint_dir, action_normalizer_type=args.action_normalizer,
+          conditioning=args.conditioning, wandb_run_id=args.wandb_run_id,
+          wandb_name=args.wandb_name)
 
 
 if __name__ == "__main__":
