@@ -4,7 +4,7 @@ import h5py
 import numpy as np
 import torch
 
-from scripts.train_flow_matching import load_data
+from scripts.train_flow_matching import CONDITIONING_PHASE_ACTIVE, load_data
 from wire_untangling.utils.normalizer import Normalizer, MinMaxNormalizer
 from wire_untangling.policies.policy_inference_wrappers import DPFMModelPolicy
 from wire_untangling.policies.flow_matching_policy import FlowMatchingSchedule
@@ -124,3 +124,81 @@ def test_dpfm_policy_executes_chunk_before_requerying():
     np.testing.assert_array_equal(a1, np.array([11.0, 11.5], dtype=np.float32))
     np.testing.assert_array_equal(a2, np.array([12.0, 12.5], dtype=np.float32))
     np.testing.assert_array_equal(a3, np.array([20.0, 20.5], dtype=np.float32))
+
+
+def test_dpfm_policy_phase_active_builds_conditioned_state():
+    class Tracker:
+        phase = 3
+        active_stick = 1
+
+        def __init__(self):
+            self.predict_calls = 0
+            self.reset_order = None
+
+        def predict(self, obs):
+            self.predict_calls += 1
+            return np.zeros(7, dtype=np.float32), {}
+
+        def reset(self, stick_order=None):
+            self.reset_order = stick_order
+
+    policy = DPFMModelPolicy.__new__(DPFMModelPolicy)
+    policy.conditioning = CONDITIONING_PHASE_ACTIVE
+    policy.num_phases = 8
+    policy.num_sticks = 2
+    policy._phase_tracker = Tracker()
+    policy._chunk = None
+    policy._nchunk = None
+    policy._chunk_idx = 0
+
+    state = policy._build_state(np.array([0.1, 0.2], dtype=np.float32))
+    policy.reset(stick_order=(1, 0))
+
+    assert state.shape == (12,)
+    np.testing.assert_allclose(state[:2], [0.1, 0.2])
+    assert state[2 + 3] == 1.0
+    assert state[2 + 8 + 1] == 1.0
+    assert policy._phase_tracker.predict_calls == 1
+    assert policy._phase_tracker.reset_order == (1, 0)
+
+
+def test_dpfm_policy_advances_phase_tracker_on_cached_actions():
+    class Tracker:
+        phase = 0
+        active_stick = 0
+
+        def __init__(self):
+            self.predict_calls = 0
+
+        def predict(self, obs):
+            self.predict_calls += 1
+            return np.zeros(7, dtype=np.float32), {}
+
+    policy = DPFMModelPolicy.__new__(DPFMModelPolicy)
+    policy.conditioning = CONDITIONING_PHASE_ACTIVE
+    policy.num_phases = 8
+    policy.num_sticks = 2
+    policy.action_dim = 2
+    policy.pred_horizon = 4
+    policy.execute_steps = 3
+    policy._phase_tracker = Tracker()
+    policy._chunk = None
+    policy._nchunk = None
+    policy._chunk_idx = 0
+
+    def sample_chunk(self, obs):
+        self._build_state(obs)
+        chunk = np.array(
+            [[10 + i, 10 + i + 0.5] for i in range(self.pred_horizon)],
+            dtype=np.float32,
+        )
+        return chunk, chunk
+
+    policy._sample_chunk = types.MethodType(sample_chunk, policy)
+
+    obs = np.zeros(2, dtype=np.float32)
+    policy.predict(obs)
+    policy.predict(obs)
+    policy.predict(obs)
+
+    assert policy._phase_tracker.predict_calls == 3
