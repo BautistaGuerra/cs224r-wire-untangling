@@ -229,6 +229,15 @@ class DPFMModelPolicy(ModelPolicy):
         )
         return np.concatenate([obs, features], axis=0)
 
+    def _advance_context_tracker(self, obs: np.ndarray) -> None:
+        if getattr(self, "conditioning", "obs") == "phase-active":
+            if self._phase_tracker is None:
+                raise RuntimeError(
+                    "phase-active DPFM requires a GymWrapper-backed phase tracker; "
+                    "run it via run_policy/play_env so set_gym_env() is called."
+                )
+            self._phase_tracker.predict(obs)
+
     def _sample_chunk(self, obs: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         state_np = self._build_state(obs)
         obs = self.obs_norm.normalize(state_np)
@@ -253,9 +262,12 @@ class DPFMModelPolicy(ModelPolicy):
 
     def predict_norm(self, obs: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """Predict both unnormalized, as well as normalized action. Normalized is used for residual RL."""
-        if self._chunk is None or self._chunk_idx >= min(self.execute_steps, self.pred_horizon):
+        needs_replan = self._chunk is None or self._chunk_idx >= min(self.execute_steps, self.pred_horizon)
+        if needs_replan:
             self._chunk, self._nchunk = self._sample_chunk(obs)
             self._chunk_idx = 0
+        else:
+            self._advance_context_tracker(obs)
         action = self._chunk[self._chunk_idx]
         naction = self._nchunk[self._chunk_idx]
         self._chunk_idx += 1

@@ -194,3 +194,45 @@ def test_dpfm_policy_phase_active_builds_conditioned_state():
     assert state[2 + 8 + 1] == 1.0
     assert policy._phase_tracker.predict_calls == 1
     assert policy._phase_tracker.reset_order == (1, 0)
+
+
+def test_dpfm_policy_advances_phase_tracker_on_cached_actions():
+    class Tracker:
+        phase = 0
+        active_stick = 0
+
+        def __init__(self):
+            self.predict_calls = 0
+
+        def predict(self, obs):
+            self.predict_calls += 1
+            return np.zeros(7, dtype=np.float32), {}
+
+    policy = DPFMModelPolicy.__new__(DPFMModelPolicy)
+    policy.conditioning = CONDITIONING_PHASE_ACTIVE
+    policy.num_phases = 8
+    policy.num_sticks = 2
+    policy.action_dim = 2
+    policy.pred_horizon = 4
+    policy.execute_steps = 3
+    policy._phase_tracker = Tracker()
+    policy._chunk = None
+    policy._nchunk = None
+    policy._chunk_idx = 0
+
+    def sample_chunk(self, obs):
+        self._build_state(obs)
+        chunk = np.array(
+            [[10 + i, 10 + i + 0.5] for i in range(self.pred_horizon)],
+            dtype=np.float32,
+        )
+        return chunk, chunk
+
+    policy._sample_chunk = types.MethodType(sample_chunk, policy)
+
+    obs = np.zeros(2, dtype=np.float32)
+    policy.predict(obs)
+    policy.predict(obs)
+    policy.predict(obs)
+
+    assert policy._phase_tracker.predict_calls == 3
