@@ -172,9 +172,9 @@ class PickPlaceExpertPolicy:
         self.grasp_yaw_threshold = grasp_yaw_threshold
         self.place_yaw_threshold = place_yaw_threshold
         self.goal_yaw = goal_yaw
-        self.stick_order = tuple(stick_order) if stick_order is not None else self._infer_stick_order()
-        if not self.stick_order:
-            raise ValueError("PickPlaceExpertPolicy requires at least one stick in stick_order")
+        self.stick_order = self._validate_stick_order(
+            stick_order if stick_order is not None else self._infer_stick_order()
+        )
         self.grasp_steps = grasp_steps
         self.release_steps = release_steps
         self.gain = gain
@@ -192,6 +192,15 @@ class PickPlaceExpertPolicy:
             i += 1
         return tuple(indices)
 
+    def _validate_stick_order(self, stick_order) -> tuple[int, ...]:
+        order = tuple(int(i) for i in stick_order)
+        if not order:
+            raise ValueError("PickPlaceExpertPolicy requires at least one stick in stick_order")
+        for idx in order:
+            if f"stick{idx}_pos" not in self.obs_map or f"goal{idx}_pos" not in self.obs_map:
+                raise ValueError(f"Unknown stick index {idx} in stick_order={list(order)}")
+        return order
+
     @property
     def phase(self) -> Phase:
         """Current phase of the FSM (read-only). Used by the demo collector
@@ -203,8 +212,10 @@ class PickPlaceExpertPolicy:
         """Stick index currently controlled by the FSM."""
         return self.stick_order[self._stick_order_idx]
 
-    def reset(self):
+    def reset(self, stick_order=None):
         """Reset internal state at the start of each episode."""
+        if stick_order is not None:
+            self.stick_order = self._validate_stick_order(stick_order)
         self._phase = Phase.APPROACH
         self._phase_step = 0
         self._stick_order_idx = 0

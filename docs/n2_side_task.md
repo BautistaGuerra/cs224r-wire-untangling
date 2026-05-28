@@ -140,6 +140,87 @@ Evaluate either checkpoint on the same N=2 environment config:
   --episodes 100
 ```
 
+## Balanced Random-Order Variant
+
+The first harder N=2 variant keeps the same side-fixed geometry but alternates
+the high-level expert order between `[0, 1]` and `[1, 0]`:
+
+```yaml
+expert:
+  order_mode: balanced
+  order_choices:
+    - [0, 1]
+    - [1, 0]
+```
+
+This is not a hidden-order task: the oracle context still supplies the current
+`phase` and `active_stick`. The BC feature shape is unchanged, so
+`phase-active` means only one-hot phase plus one-hot active stick.
+
+Smoke test the expert:
+
+```bash
+.venv/bin/python scripts/collect_demos.py \
+  --config configs/stick_reorder_n2_random_order.yaml \
+  --smoke \
+  --smoke-n 20 \
+  --smoke-threshold 0.80 \
+  --seed 42
+```
+
+Collect balanced demos:
+
+```bash
+.venv/bin/python scripts/collect_demos.py \
+  --config configs/stick_reorder_n2_random_order.yaml \
+  --num-demos 200 \
+  --output data/stick_n2_random_order_demos.hdf5 \
+  --seed 42
+```
+
+Train the two MLP-BC baselines:
+
+```bash
+.venv/bin/python scripts/train_bc.py \
+  --demos-path data/stick_n2_random_order_demos.hdf5 \
+  --checkpoint-dir checkpoints/mlp_bc_n2_random_order_obs \
+  --conditioning obs \
+  --seed 42 \
+  --no-wandb
+```
+
+```bash
+.venv/bin/python scripts/train_bc.py \
+  --demos-path data/stick_n2_random_order_demos.hdf5 \
+  --checkpoint-dir checkpoints/mlp_bc_n2_random_order_phase_active \
+  --conditioning phase-active \
+  --seed 42 \
+  --no-wandb
+```
+
+Evaluate with per-order success reporting:
+
+```bash
+.venv/bin/python scripts/play_env.py \
+  --config configs/stick_reorder_n2_random_order.yaml \
+  --bc_checkpoint checkpoints/mlp_bc_n2_random_order_obs/mlp_bc_policy.pt \
+  --episodes 100
+```
+
+```bash
+.venv/bin/python scripts/play_env.py \
+  --config configs/stick_reorder_n2_random_order.yaml \
+  --bc_checkpoint checkpoints/mlp_bc_n2_random_order_phase_active/mlp_bc_policy.pt \
+  --episodes 100
+```
+
+After verifying oracle-context BC on this task, the next step is to replace
+scripted `phase` / `active_stick` labels at rollout time with a learned
+context model from state or short history.
+
+See [n2_random_order_results.md](n2_random_order_results.md) for the initial
+random-order BC results and interpretation.
+
 Render a few demos before a large collection:
 
 ```bash
