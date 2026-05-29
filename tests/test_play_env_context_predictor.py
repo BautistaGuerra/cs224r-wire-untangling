@@ -4,13 +4,14 @@ import numpy as np
 import pytest
 import torch
 
-from scripts.play_env import (
+from wire_untangling.policies.context_predictor import ContextPredictor
+from wire_untangling.policies.mlp_bc import MLPBCPolicy
+from wire_untangling.policies.policy_inference_wrappers import (
     MLPBCModelPolicy,
     hard_context_from_logits,
     load_context_predictor_checkpoint,
 )
-from wire_untangling.policies.context_predictor import ContextPredictor
-from wire_untangling.policies.mlp_bc import MLPBCPolicy
+from wire_untangling.utils.normalizer import Normalizer
 
 
 def _save_bc_checkpoint(
@@ -35,8 +36,10 @@ def _save_bc_checkpoint(
             "num_sticks": num_sticks,
             "hidden_dims": [8],
             "dropout": 0.0,
-            "state_mean": torch.zeros(state_dim),
-            "state_std": torch.ones(state_dim),
+            "obs_norm": Normalizer(
+                loc=np.zeros(state_dim, dtype=np.float32),
+                scale=np.ones(state_dim, dtype=np.float32),
+            ).state_dict(),
         },
         path,
     )

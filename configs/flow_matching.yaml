@@ -6,7 +6,7 @@ dpfm:
   # The number of steps for denoising
   integration_steps: 10
 
-train:
+dpfm_train:
   # Size of the training batch
   batch_size: 2048
   # Training epochs

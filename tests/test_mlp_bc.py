@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.join(_REPO_ROOT, "scripts"))
 from train_bc import CONDITIONING_PHASE_ACTIVE, load_data, train  # noqa: E402
 
 from wire_untangling.policies.mlp_bc import MLPBCPolicy, mse_loss
+from wire_untangling.utils.normalizer import Normalizer
 
 
 # ── Policy unit tests ──────────────────────────────────────────────────
@@ -110,16 +111,16 @@ def test_train_bc_end_to_end(synthetic_demos, tmp_path):
 
     ckpt = torch.load(str(save_path), map_location="cpu", weights_only=True)
     expected_keys = {"model_state_dict", "state_dim", "action_dim",
-                     "hidden_dims", "dropout", "state_mean", "state_std"}
+                     "hidden_dims", "dropout", "obs_norm"}
     assert expected_keys.issubset(ckpt.keys()), \
         f"Missing keys: {expected_keys - set(ckpt.keys())}"
 
     assert int(ckpt["state_dim"]) == 8
     assert int(ckpt["action_dim"]) == 7
-    assert isinstance(ckpt["state_mean"], torch.Tensor)
-    assert isinstance(ckpt["state_std"], torch.Tensor)
-    assert ckpt["state_mean"].shape == (8,)
-    assert ckpt["state_std"].shape == (8,)
+    assert isinstance(ckpt["obs_norm"], dict)
+    obs_norm = Normalizer.from_state_dict(ckpt["obs_norm"])
+    assert obs_norm.loc.shape == (8,)
+    assert obs_norm.scale.shape == (8,)
     # Re-instantiate and load — should not raise
     policy = MLPBCPolicy(
         state_dim=int(ckpt["state_dim"]),
@@ -132,7 +133,7 @@ def test_train_bc_end_to_end(synthetic_demos, tmp_path):
 
 
 def test_load_data_phase_active_appends_one_hot_features(synthetic_demos):
-    loader, state_dim, action_dim, state_mean, state_std, meta = load_data(
+    loader, state_dim, action_dim, obs_norm, meta = load_data(
         synthetic_demos,
         batch_size=16,
         shuffle=False,
@@ -144,8 +145,8 @@ def test_load_data_phase_active_appends_one_hot_features(synthetic_demos):
     assert meta["raw_obs_dim"] == 8
     assert meta["num_phases"] == 8
     assert meta["num_sticks"] == 2
-    assert state_mean.shape == (18,)
-    assert state_std.shape == (18,)
+    assert obs_norm.loc.shape == (18,)
+    assert obs_norm.scale.shape == (18,)
 
     states, actions = next(iter(loader))
     assert states.shape[1] == 18
@@ -173,5 +174,6 @@ def test_train_bc_phase_active_checkpoint_metadata(synthetic_demos, tmp_path):
     assert int(ckpt["state_dim"]) == 18
     assert int(ckpt["num_phases"]) == 8
     assert int(ckpt["num_sticks"]) == 2
-    assert ckpt["state_mean"].shape == (18,)
-    assert ckpt["state_std"].shape == (18,)
+    obs_norm = Normalizer.from_state_dict(ckpt["obs_norm"])
+    assert obs_norm.loc.shape == (18,)
+    assert obs_norm.scale.shape == (18,)

@@ -8,8 +8,8 @@ from torch.utils.data import DataLoader, TensorDataset
 import torch
 
 from wire_untangling.policies.flow_matching_policy import FlowMatchingPolicy, flow_matching_loss
-from wire_untangling.utils.normalizer import Normalizer
-
+from wire_untangling.utils.normalizer import Normalizer, DEFAULT_SCALE_OBSERVATIONS, DEFAULT_SCALE_ACTIONS
+import scripts.rrl_env_creation as rrl_env
 
 def load_config(
     env_config: str = "configs/stick_reorder.yaml",
@@ -24,42 +24,26 @@ def load_config(
 
 def make_action_bounds(config: dict) -> tuple[np.ndarray, np.ndarray]:
     """Create the current one-stick env and return raw action bounds."""
-    from wire_untangling.envs import StickReorderEnv
 
     env_cfg = dict(config.get("env", {}))
     env_cfg["num_sticks"] = 1
-    raw_env = StickReorderEnv(
-        robots=env_cfg.get("robot", "Panda"),
-        num_sticks=env_cfg.get("num_sticks", 1),
-        stick_length=env_cfg.get("stick_length", 0.20),
-        stick_radius=env_cfg.get("stick_radius", 0.0075),
-        goal_spacing=env_cfg.get("goal_spacing", 0.06),
-        success_threshold=env_cfg.get("success_threshold", 0.03),
-        orientation_threshold=env_cfg.get("orientation_threshold", np.deg2rad(10.0)),
-        lambda_rot=env_cfg.get("lambda_rot", 0.1),
-        goal_yaw=env_cfg.get("goal_yaw", 0.0),
-        reward_shaping=env_cfg.get("reward_shaping", True),
-        terminate_on_success=env_cfg.get("terminate_on_success", True),
-        has_renderer=False,
-        has_offscreen_renderer=False,
-        use_camera_obs=False,
-        control_freq=20,
-        horizon=env_cfg.get("horizon", 500),
-    )
+    raw_env = rrl_env.make_rrl_gym_env_1stick(env_cfg)
     try:
         low, high = raw_env.action_spec
+        print(f'Environment created with action bounds. low: {low}, high: {high}')
         return np.asarray(low, dtype=np.float32), np.asarray(high, dtype=np.float32)
     finally:
         raw_env.close()
 
 
-def train(config: dict, demos_path: str, seed: int = 42, use_wandb: bool = True, checkpoint_dir: str = "checkpoints"):
+def train(config: dict, demos_path: str, seed: int = None, use_wandb: bool = True, checkpoint_dir: str = "checkpoints"):
     dpfm_cfg = config.get("dpfm", {})
-    train_cfg = config.get("train", {})
+    train_cfg = config.get("dpfm_train", {})
 
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
+    if seed is not None:
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     batch_size = int(train_cfg.get("batch_size", 2048))
@@ -98,7 +82,7 @@ def train(config: dict, demos_path: str, seed: int = 42, use_wandb: bool = True,
         state_dim=int(state_dim),
         action_dim=int(action_dim),
         pred_horizon=int(dpfm_cfg.get("action_chunk_horizon", 20)),
-        num_steps=int(dpfm_cfg.get("integration_steps", 10)),
+        num_integration_steps=int(dpfm_cfg.get("integration_steps", 10)),
         device=device,
     ).to(device)
     optimizer = torch.optim.Adam(policy.parameters(), lr=lr)
@@ -128,7 +112,8 @@ def train(config: dict, demos_path: str, seed: int = 42, use_wandb: bool = True,
         "action_dim": action_dim,
         "pred_horizon": chunk_size,
         "execute_steps": execute_steps,
-        "num_steps": int(dpfm_cfg.get("integration_steps", 10)),
+        # TODO(alexta): rename to num_integration_steps
+        "num_integration_steps": int(dpfm_cfg.get("integration_steps", 10)),
         "obs_norm": obs_norm.state_dict(),
         "action_norm": action_norm.state_dict(),
     }, save_path)
@@ -218,8 +203,9 @@ def load_data(
     flat_actions = np.concatenate(all_actions, axis=0)
 
     # Initialize the normalizer from data
-    obs_norm = Normalizer.from_data(flat_obs)
-    action_norm = Normalizer.from_data(flat_actions, clip_low=action_low, clip_high=action_high)
+    obs_norm = Normalizer.from_data(flat_obs, default_scale=DEFAULT_SCALE_OBSERVATIONS)
+    action_norm = Normalizer.from_data(flat_actions, clip_low=action_low, clip_high=action_high,
+                                       default_scale=DEFAULT_SCALE_ACTIONS)
 
     episode_ends = np.cumsum(episode_lengths)
     indices = create_chunk_indices(episode_ends, chunk_size, pad_after=chunk_size - 1)
@@ -256,8 +242,8 @@ def main():
 
     cfg = load_config(args.env_config, args.dpfm_config)
 
-    seed = args.seed if args.seed is not None else cfg.get("training", {}).get("seed", 42)
-    train(cfg, demos_path=args.demos_path, seed=seed, use_wandb=not args.no_wandb, checkpoint_dir=args.checkpoint_dir)
+    # seed = args.seed if args.seed is not None else cfg.get("training", {}).get("seed", 42)
+    train(cfg, demos_path=args.demos_path, seed=args.seed, use_wandb=not args.no_wandb, checkpoint_dir=args.checkpoint_dir)
 
 
 if __name__ == "__main__":

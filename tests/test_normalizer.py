@@ -307,6 +307,35 @@ class TestSerialization:
         n2 = Normalizer.from_state_dict(n.state_dict())
         assert n2.scale[0] == pytest.approx(Normalizer.EPS)
 
+    def test_from_data_with_custom_default_scale_roundtrip(self):
+        """Scales clamped to a custom default_scale at training time must
+        survive the state_dict roundtrip exactly, even if the class-level EPS
+        differs from the default_scale used during creation."""
+        # Dim 0: std=0.5 (above default_scale, untouched)
+        # Dim 1: std=0.003 (below default_scale=0.01, clamped up)
+        # Dim 2: std=0.0 (constant column, clamped up)
+        data = np.array([
+            [1.0, 10.0, 7.0],
+            [2.0, 10.003, 7.0],
+            [0.0, 9.997, 7.0],
+        ], dtype=np.float32)
+        custom_default = 0.01
+        n = Normalizer.from_data(data, default_scale=custom_default)
+
+        assert n.scale[0] > custom_default  # natural std preserved
+        assert n.scale[1] == pytest.approx(custom_default)  # clamped up
+        assert n.scale[2] == pytest.approx(custom_default)  # clamped up
+
+        # Save and reload
+        n2 = Normalizer.from_state_dict(n.state_dict())
+        np.testing.assert_array_equal(n.scale, n2.scale)
+        np.testing.assert_array_equal(n.loc, n2.loc)
+
+        # Verify normalize/denormalize produce identical results
+        x = np.array([[1.5, 10.001, 7.0]], dtype=np.float32)
+        np.testing.assert_allclose(n.normalize(x), n2.normalize(x))
+        np.testing.assert_allclose(n.denormalize(x), n2.denormalize(x))
+
 
 # ── torch paths ──────────────────────────────────────────────────────────
 
