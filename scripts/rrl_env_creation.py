@@ -15,6 +15,7 @@ def make_rrl_gym_env_1stick(env_cfg: dict):
         lambda_rot=env_cfg.get("lambda_rot", 0.1),
         goal_yaw=env_cfg.get("goal_yaw", 0.0),
         reward_shaping=env_cfg.get("reward_shaping", True),
+        success_bonus=env_cfg.get("success_bonus", 1.0),
         terminate_on_success=env_cfg.get("terminate_on_success", True),
         has_renderer=False,
         has_offscreen_renderer=False,

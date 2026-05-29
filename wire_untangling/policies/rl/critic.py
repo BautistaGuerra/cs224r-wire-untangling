@@ -25,17 +25,24 @@ class Critic(nn.Module):
         super().__init__()
         self.cfg = cfg #num_experts = num_experts
 
-        self.critics = nn.ModuleList([nn.Sequential(
-            nn.Linear(state_dim[0] + action_dim[0], cfg.critic.hidden_dim),
-            nn.LayerNorm(cfg.critic.hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(cfg.critic.hidden_dim, cfg.critic.hidden_dim),
-            nn.LayerNorm(cfg.critic.hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(cfg.critic.hidden_dim, 1))
-            for _ in range(cfg.critic.num_critics)])
+        self.critics = nn.ModuleList([
+            nn.Sequential(*self._produce_critic_trunk(state_dim, action_dim, cfg))
+            for _ in range(cfg.critic.num_critics)
+        ])
 
         self.apply(init_critic_weights)
+
+    def _produce_critic_trunk(self, state_dim, action_dim, cfg):
+        """Create a network for the critic."""
+        layers = []
+        prev_layer_dim = state_dim + action_dim
+        for i, layer_dim in enumerate(cfg.critic.hidden_dims):
+            layers.append(nn.Linear(prev_layer_dim, layer_dim))
+            layers.append(nn.LayerNorm(layer_dim))
+            layers.append(nn.ReLU(inplace=True))
+            prev_layer_dim = layer_dim
+        layers.append(nn.Linear(prev_layer_dim, 1))
+        return layers
 
     def forward(self, obs, action):
         """Evaluate every critic on the provided state-action batch."""

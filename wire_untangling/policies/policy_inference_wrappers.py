@@ -25,9 +25,14 @@ def make_phase_active_features(
 
 class ModelPolicy(object):
     def __init__(self, model_path:str, gym_env):
+        self.obs_norm = None
+        self.action_norm = None
         pass
 
-    def predict(self, obs:torch.Tensor) -> torch.Tensor:
+    def predict(self, obs:np.ndarray) -> np.ndarray:
+        pass
+
+    def predict_norm(self, obs: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         pass
 
     def reset(self):
@@ -40,7 +45,7 @@ class SACModelPolicy(ModelPolicy):
         self.model = SAC.load(model_path)
         self.gym_env = gym_env
 
-    def predict(self, obs:torch.Tensor) ->torch.Tensor:
+    def predict(self, obs: np.ndarray) ->np.ndarray:
         action, _ = self.model.predict(obs, deterministic=True)
         return action
 
@@ -142,6 +147,9 @@ class DPFMModelPolicy(ModelPolicy):
         self.execute_steps = max(1, min(self.execute_steps, self.pred_horizon))
         self.stochastic = stochastic
 
+        print('')
+        print('Initializing the DPFM policy')
+        print('')
         print(f'Integration steps: {self.num_integration_steps}')
         print(f'Prediction horizon: {self.pred_horizon}')
         print(f'Execution steps: {self.execute_steps}')
@@ -214,6 +222,9 @@ class ResidualRLPolicy(ModelPolicy):
 
     def __init__(self, rl_model_path: str, base_model_path: str, base_policy: ModelPolicy, gym_env, rrl_cfg):
         super().__init__(rl_model_path, gym_env)
+        print('')
+        print('Initializing the ResidualRL policy')
+        print('')
         self.gym_env = gym_env
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.base_policy = base_policy
@@ -226,11 +237,9 @@ class ResidualRLPolicy(ModelPolicy):
         rrl_cfg.action_dim = self.action_dim
 
         rl_checkpoint = torch.load(rl_model_path, map_location=self.device, weights_only=True)
-        # if "obs_norm" in checkpoint:
-        assert "obs_norm" in checkpoint
-        self.obs_norm = Normalizer.from_state_dict(checkpoint["obs_norm"])
-        assert "action_norm" in checkpoint
-        self.action_norm = Normalizer.from_state_dict(checkpoint["action_norm"])
+        # Use exactly the same normalizers as the base policy
+        self.obs_norm = self.base_policy.obs_norm
+        self.action_norm = self.base_policy.action_norm
 
         self.rrl_model = TD3Agent(rrl_cfg)
         self.rrl_model.load_state_dict(rl_checkpoint["model_state_dict"])
@@ -240,7 +249,7 @@ class ResidualRLPolicy(ModelPolicy):
     def reset(self):
         self.base_policy.reset()
 
-    def predict_rrl(self, obs: np.ndarray) -> np.ndarray:
+    def predict_rrl(self, obs: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Predicts the action using residual RL.
         Args:
             obs: UNNORMALIZED observations
@@ -262,17 +271,15 @@ class ResidualRLPolicy(ModelPolicy):
             residual_action = self.rrl_model.act(
                 torch.Tensor(nobs).to(self.device),
                 torch.Tensor(base_naction).to(self.device),
+                # Do not add any noise to the action.
                 eval_mode=True).cpu().numpy()
-        # Here, the prediction is in the normalized space
-        # final_naction = residual_action + base_naction
-        # final_action = self.action_norm.denormalize(final_naction)
-        # return final_action, residual_action, base_naction
         return ResidualRLPolicy.combine_actions(self.action_norm, base_naction, residual_action)
 
     @staticmethod
-    def combine_actions(action_norm, base_naction, residual_action: np.ndarray) -> np.ndarray:
+    def combine_actions(action_norm, base_naction: np.ndarray, residual_action: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         # Here, the prediction is in the normalized space
-        final_naction = residual_action + base_naction
+        # TODO(alexta): verify if adding actions to the always-zero action dimensions screws training
+        final_naction = TD3Agent.get_combined_action_numpy(base_naction, residual_action)
         final_action = action_norm.denormalize(final_naction)
         return final_action, residual_action, base_naction
 

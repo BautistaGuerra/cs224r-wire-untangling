@@ -110,6 +110,7 @@ class StickReorderEnv(ManipulationEnv):
         side_goal_y_ranges=((-0.08, -0.02), (0.02, 0.08)),
         stick_color_indices=None,
         reward_shaping: bool = True,
+        success_bonus: float = 1.0,
         terminate_on_success: bool = True,
         table_full_size=(0.8, 0.8, 0.05),
         table_friction=(1.0, 0.005, 0.0001),
@@ -132,6 +133,7 @@ class StickReorderEnv(ManipulationEnv):
         self.side_goal_x = float(side_goal_x)
         self.side_goal_y_ranges = tuple(tuple(r) for r in side_goal_y_ranges)
         self.reward_shaping = reward_shaping
+        self.success_bonus = success_bonus
         self.terminate_on_success = terminate_on_success
         self.reward_scale = 1.0   # required by GymWrapper
         self.use_object_obs = True  # always include stick positions in obs
@@ -369,7 +371,7 @@ class StickReorderEnv(ManipulationEnv):
     def reward(self, action=None) -> float:
         """Compute reward for current state.
         Dense: -sum_i (dist_i + lambda_rot * yaw_err_i).
-        Sparse: +1.0 bonus when all sticks are within success_threshold of goals
+        Sparse: +success_bonus when all sticks are within success_threshold of goals
         AND yaw_err <= orientation_threshold."""
         reward = 0.0
 
@@ -381,7 +383,7 @@ class StickReorderEnv(ManipulationEnv):
                 reward -= dist + self.lambda_rot * yaw_err
 
         if self._check_success():
-            reward += 1.0
+            reward += self.success_bonus
 
         return reward
 
@@ -394,9 +396,22 @@ class StickReorderEnv(ManipulationEnv):
             done = True
         return reward, done, info
 
+    def _is_gripper_open(self, threshold: float = 0.02) -> bool:
+        """Check if the gripper fingers are open (not grasping)."""
+        idx = self.robots[0]._ref_gripper_joint_pos_indexes["right"]
+        qpos = self.sim.data.qpos[idx[0]]
+        return qpos > threshold
+
     def _check_success(self) -> bool:
         """All sticks must be within success_threshold of their goal positions
-        AND within orientation_threshold of goal_yaw (mod π)."""
+        AND within orientation_threshold of goal_yaw (mod π)
+        AND the gripper must be open (stick has been released)."""
+        # TODO(alexta): This code should consider rollout to be successful iff gripper is open.
+        # Currently, it does not work as expected. I believe we need a "retract" phase of the arm
+        # to be present in the demonstrations so it would work.
+
+        # if not self._is_gripper_open():
+        #     return False
         for i, body_id in enumerate(self.stick_body_ids):
             pos = self.sim.data.body_xpos[body_id]
             if np.linalg.norm(pos - self._goal_positions[i]) > self.success_threshold:

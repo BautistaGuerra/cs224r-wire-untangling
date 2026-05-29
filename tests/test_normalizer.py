@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 import torch
 
-from wire_untangling.utils.normalizer import Normalizer
+from wire_untangling.utils.normalizer import Normalizer, MinMaxNormalizer
 
 
 # ── from_data stats ──────────────────────────────────────────────────────
@@ -429,3 +429,99 @@ class TestNormalizeDims:
         assert n2.normalize_dims == [0, 1]
         x = np.array([[1.5, 2.5, 99, 77]], dtype=np.float32)
         np.testing.assert_allclose(n.normalize(x), n2.normalize(x))
+
+
+# ── MinMaxNormalizer ───────────────────────────────────────────────────
+
+class TestMinMaxNormalizer:
+    """Black-box tests for MinMaxNormalizer using only its public API."""
+
+    def test_known_values_map_to_endpoints(self):
+        """Data min should map to -1, data max should map to +1."""
+        data = np.array([[0, 10], [4, 20], [2, 15]], dtype=np.float32)
+        n = MinMaxNormalizer.from_data(data)
+        # min of dim 0 is 0, max is 4; min of dim 1 is 10, max is 20
+        low = np.array([[0, 10]], dtype=np.float32)
+        high = np.array([[4, 20]], dtype=np.float32)
+        np.testing.assert_allclose(n.normalize(low), [[-1.0, -1.0]], atol=1e-5)
+        np.testing.assert_allclose(n.normalize(high), [[1.0, 1.0]], atol=1e-5)
+
+    def test_midpoint_maps_to_zero(self):
+        """The midpoint of the range should normalize to 0."""
+        data = np.array([[-2, 0], [2, 8]], dtype=np.float32)
+        n = MinMaxNormalizer.from_data(data)
+        mid = np.array([[0, 4]], dtype=np.float32)
+        np.testing.assert_allclose(n.normalize(mid), [[0.0, 0.0]], atol=1e-5)
+
+    def test_output_always_in_minus1_plus1(self):
+        """Any input within the observed range should normalize to [-1, 1]."""
+        rng = np.random.default_rng(42)
+        data = rng.standard_normal((100, 5)).astype(np.float32)
+        n = MinMaxNormalizer.from_data(data)
+        normed = n.normalize(data)
+        assert np.all(normed >= -1.0 - 1e-6)
+        assert np.all(normed <= 1.0 + 1e-6)
+
+    def test_out_of_range_input_is_clamped(self):
+        """Inputs outside the observed range should be clamped to [-1, 1]."""
+        data = np.array([[0, 0], [1, 1]], dtype=np.float32)
+        n = MinMaxNormalizer.from_data(data)
+        extreme = np.array([[100, -100]], dtype=np.float32)
+        normed = n.normalize(extreme)
+        assert normed[0, 0] == pytest.approx(1.0)
+        assert normed[0, 1] == pytest.approx(-1.0)
+
+    def test_denormalize_roundtrip(self):
+        """denormalize(normalize(x)) should recover x for in-range values."""
+        rng = np.random.default_rng(7)
+        data = rng.uniform(-3, 3, size=(50, 4)).astype(np.float32)
+        n = MinMaxNormalizer.from_data(data)
+        np.testing.assert_allclose(n.denormalize(n.normalize(data)), data, atol=1e-5)
+
+    def test_denormalize_endpoints(self):
+        """-1 should denormalize to data min, +1 to data max."""
+        data = np.array([[2, 100], [8, 200]], dtype=np.float32)
+        n = MinMaxNormalizer.from_data(data)
+        low = n.denormalize(np.array([[-1.0, -1.0]], dtype=np.float32))
+        high = n.denormalize(np.array([[1.0, 1.0]], dtype=np.float32))
+        np.testing.assert_allclose(low, [[2, 100]], atol=1e-4)
+        np.testing.assert_allclose(high, [[8, 200]], atol=1e-4)
+
+    def test_constant_dim_does_not_produce_nan(self):
+        """A dimension with zero range should not produce nan or inf."""
+        data = np.array([[5, 1], [5, 2], [5, 3]], dtype=np.float32)
+        n = MinMaxNormalizer.from_data(data)
+        out = n.normalize(data)
+        assert np.all(np.isfinite(out))
+
+    def test_single_row_input(self):
+        """A 1-D input should work without errors."""
+        data = np.array([[0, 10], [4, 20]], dtype=np.float32)
+        n = MinMaxNormalizer.from_data(data)
+        x = np.array([2, 15], dtype=np.float32)
+        out = n.normalize(x)
+        assert np.all(np.isfinite(out))
+        np.testing.assert_allclose(out, [0.0, 0.0], atol=1e-5)
+
+    def test_state_dict_roundtrip(self):
+        """from_state_dict(state_dict()) should produce identical behavior."""
+        rng = np.random.default_rng(99)
+        data = rng.uniform(-5, 5, size=(30, 3)).astype(np.float32)
+        n = MinMaxNormalizer.from_data(data)
+        n2 = MinMaxNormalizer.from_state_dict(n.state_dict())
+        x = rng.uniform(-5, 5, size=(10, 3)).astype(np.float32)
+        np.testing.assert_allclose(n.normalize(x), n2.normalize(x))
+        np.testing.assert_allclose(n.denormalize(n.normalize(x)), n2.denormalize(n2.normalize(x)))
+
+    def test_torch_matches_numpy(self):
+        """Torch normalize/denormalize should produce identical results to numpy."""
+        rng = np.random.default_rng(11)
+        data = rng.uniform(-2, 2, size=(20, 4)).astype(np.float32)
+        n = MinMaxNormalizer.from_data(data)
+        x_np = rng.uniform(-2, 2, size=(5, 4)).astype(np.float32)
+        x_t = torch.tensor(x_np)
+        np.testing.assert_allclose(
+            n.normalize_torch(x_t).numpy(), n.normalize(x_np), atol=1e-6)
+        np.testing.assert_allclose(
+            n.denormalize_torch(n.normalize_torch(x_t)).numpy(),
+            n.denormalize(n.normalize(x_np)), atol=1e-6)

@@ -74,6 +74,7 @@ def make_env(
         lambda_rot=env_cfg.get("lambda_rot", 0.1),
         goal_yaw=env_cfg.get("goal_yaw", 0.0),
         reward_shaping=env_cfg.get("reward_shaping", True),
+        success_bonus=env_cfg.get("success_bonus", 1.0),
         terminate_on_success=env_cfg.get("terminate_on_success", True),
         has_renderer=render,
         has_offscreen_renderer=record,
@@ -328,10 +329,7 @@ if __name__ == "__main__":
     elif args.bc_checkpoint:
         policy = MLPBCModelPolicy(args.bc_checkpoint, env)
         run_policy(env, policy, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record, results_file=args.results_file)
-    # elif args.sac_checkpoint:
-    #     policy = SACModelPolicy(args.sac_checkpoint, env)
-    #     run_policy(env, policy, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record, results_file=args.results_file)
-    elif args.dpfm_checkpoint:
+    elif args.dpfm_checkpoint and not args.rrl_checkpoint:
         policy = DPFMModelPolicy(
             args.dpfm_checkpoint,
             env,

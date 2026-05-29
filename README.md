@@ -219,3 +219,17 @@ Training:
 
 Inference:
 ```python -m scripts.play_env  --dpfm_checkpoint checkpoints/flow_matching/flow_matching_policy.pt --num-sticks 1 --episodes 100```
+
+### Train the Residual RL (RRL) policy
+
+Training on a ready flow matching policy:
+
+```python -m scripts.train_residual_rl --dpfm-checkpoint checkpoints/flow_matching/flow_matching_policy.pt --num-sticks 1 --td3-config configs/residual_td3.yaml```
+
+Inference:
+
+```python -m scripts.play_env --config configs/stick_reorder.yaml --rrl-checkpoint checkpoints/td3/td3_step500000.pt --rrl-config configs/residual_td3.yaml --dpfm_checkpoint checkpoints/flow_matching/flow_matching_policy.pt --dpfm-stochastic --num-sticks 1 --episodes 100```
+
+Or, from a sweep run:
+
+```python -m scripts.play_env --config configs/stick_reorder.yaml --rrl-checkpoint checkpoints/sweep_rrl/dpfm_zscore_as0.2_of0.5/td3_final.pt --rrl-config configs/residual_td3.yaml --dpfm_checkpoint checkpoints/sweep_dpfm_2026_05_26/norm_zscore_h8_e4_i20/flow_matching_policy.pt --dpfm-stochastic --num-sticks 1 --episodes 100```

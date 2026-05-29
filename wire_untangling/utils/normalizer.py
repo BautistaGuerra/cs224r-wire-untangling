@@ -280,14 +280,12 @@ class IdentityNormalizer:
 class MinMaxNormalizer:
     """Per-dimension min-max normalizer that scales data to [-1, 1].
 
-    Forward:  2 * (x - min) / range - 1
-    Inverse:  (x + 1) * range / 2 + min
+    Forward:  2 * (x - min) / range - 1   (only on masked dims)
+    Inverse:  (x + 1) * range / 2 + min   (only on masked dims)
 
+    Excluded dims (not in normalize_dims) pass through unchanged.
     Works with both numpy and torch. Provides the same API as Normalizer
     (normalize/denormalize, state_dict/from_state_dict, from_data).
-
-    TODO(alexta): currently DPFM has 0 success rate with this particular normalizer.
-    Possibly there's an issue with implementation
     """
 
     def __init__(
@@ -305,11 +303,12 @@ class MinMaxNormalizer:
             min_range: Minimum range per dimension to prevent blow-up on
                        constant dims. Matches reference ActionScaler default.
             normalize_dims: Optional list of dimension indices to normalize.
-                        Excluded dims get identity transform.
+                        Excluded dims pass through unchanged.
                         If None, all dims are normalized.
         """
         data_min = np.asarray(data_min, dtype=np.float32)
         data_max = np.asarray(data_max, dtype=np.float32)
+        ndims = len(data_min)
 
         mid = (data_min + data_max) / 2
         half_range = (data_max - data_min) / 2
@@ -318,60 +317,66 @@ class MinMaxNormalizer:
         self.data_min = mid - half_range
         self.data_max = mid + half_range
         self.data_range = self.data_max - self.data_min
-        self.data_range = np.maximum(self.data_range, 1e-8)
 
-        # Filter out-of-bounds indices
+        # Build boolean mask: True for dims that get normalized
         if normalize_dims is not None:
-            normalize_dims = [d for d in normalize_dims if d < len(self.data_min)]
+            normalize_dims = [d for d in normalize_dims if d < ndims]
             if not normalize_dims:
                 normalize_dims = None
         self.normalize_dims = normalize_dims
-
-        # Identity transform for excluded dims
+        self._mask = np.ones(ndims, dtype=bool)
         if self.normalize_dims is not None:
-            mask = np.zeros(len(self.data_min), dtype=bool)
-            mask[self.normalize_dims] = True
-            self.data_min[~mask] = 0.0
-            self.data_max[~mask] = 1.0
-            self.data_range[~mask] = 1.0
+            self._mask[:] = False
+            self._mask[self.normalize_dims] = True
 
-        ndims = len(self.data_min)
-        normed = len(self.normalize_dims) if self.normalize_dims is not None else ndims
+        normed = int(self._mask.sum())
         print(
             f"MinMaxNormalizer created: dims={ndims}, normalized={normed}, "
-            f"range=[{self.data_range.min():.4f}, {self.data_range.max():.4f}]"
+            f"range=[{self.data_range[self._mask].min():.4f}, {self.data_range[self._mask].max():.4f}]"
         )
 
     # ── numpy paths ──────────────────────────────────────────────────────
 
     def normalize(self, x: np.ndarray) -> np.ndarray:
-        """Scale to [-1, 1]."""
-        x_clamped = np.clip(x, self.data_min, self.data_max)
-        return 2.0 * (x_clamped - self.data_min) / self.data_range - 1.0
+        """Scale masked dims to [-1, 1]. Excluded dims pass through."""
+        out = np.array(x, dtype=np.float32, copy=True)
+        m = self._mask
+        clamped = np.clip(out[..., m], self.data_min[m], self.data_max[m])
+        out[..., m] = 2.0 * (clamped - self.data_min[m]) / self.data_range[m] - 1.0
+        return out
 
     def denormalize(self, x: np.ndarray) -> np.ndarray:
-        """Unscale from [-1, 1] back to original range."""
-        x_clamped = np.clip(x, -1.0, 1.0)
-        return self.data_min + (x_clamped + 1.0) * self.data_range / 2.0
+        """Unscale masked dims from [-1, 1]. Excluded dims pass through."""
+        out = np.array(x, dtype=np.float32, copy=True)
+        m = self._mask
+        clamped = np.clip(out[..., m], -1.0, 1.0)
+        out[..., m] = self.data_min[m] + (clamped + 1.0) * self.data_range[m] / 2.0
+        return out
 
     # ── torch paths ──────────────────────────────────────────────────────
 
     def normalize_torch(self, x: torch.Tensor, device: torch.device | None = None) -> torch.Tensor:
-        """Scale to [-1, 1] (torch)."""
+        """Scale masked dims to [-1, 1] (torch). Excluded dims pass through."""
         d = device or x.device
-        dmin = torch.as_tensor(self.data_min, dtype=torch.float32, device=d)
-        dmax = torch.as_tensor(self.data_max, dtype=torch.float32, device=d)
-        drange = torch.as_tensor(self.data_range, dtype=torch.float32, device=d)
-        x_clamped = torch.clamp(x, dmin, dmax)
-        return 2.0 * (x_clamped - dmin) / drange - 1.0
+        out = x.clone()
+        m = torch.as_tensor(self._mask, device=d)
+        dmin = torch.as_tensor(self.data_min, dtype=torch.float32, device=d)[m]
+        dmax = torch.as_tensor(self.data_max, dtype=torch.float32, device=d)[m]
+        drange = torch.as_tensor(self.data_range, dtype=torch.float32, device=d)[m]
+        clamped = torch.clamp(out[..., m], dmin, dmax)
+        out[..., m] = 2.0 * (clamped - dmin) / drange - 1.0
+        return out
 
     def denormalize_torch(self, x: torch.Tensor, device: torch.device | None = None) -> torch.Tensor:
-        """Unscale from [-1, 1] (torch)."""
+        """Unscale masked dims from [-1, 1] (torch). Excluded dims pass through."""
         d = device or x.device
-        dmin = torch.as_tensor(self.data_min, dtype=torch.float32, device=d)
-        drange = torch.as_tensor(self.data_range, dtype=torch.float32, device=d)
-        x_clamped = torch.clamp(x, -1.0, 1.0)
-        return dmin + (x_clamped + 1.0) * drange / 2.0
+        out = x.clone()
+        m = torch.as_tensor(self._mask, device=d)
+        dmin = torch.as_tensor(self.data_min, dtype=torch.float32, device=d)[m]
+        drange = torch.as_tensor(self.data_range, dtype=torch.float32, device=d)[m]
+        clamped = torch.clamp(out[..., m], -1.0, 1.0)
+        out[..., m] = dmin + (clamped + 1.0) * drange / 2.0
+        return out
 
     # ── serialization ────────────────────────────────────────────────────
 
@@ -396,6 +401,11 @@ class MinMaxNormalizer:
         obj.data_max = d["data_max"].cpu().numpy()
         obj.data_range = d["data_range"].cpu().numpy()
         obj.normalize_dims = normalize_dims
+        ndims = len(obj.data_min)
+        obj._mask = np.ones(ndims, dtype=bool)
+        if normalize_dims is not None:
+            obj._mask[:] = False
+            obj._mask[normalize_dims] = True
         return obj
 
     @classmethod
@@ -424,7 +434,7 @@ NORMALIZER_TYPES = {
     NORM_ZSCORE: Normalizer,
     # TODO(alexta): MinMaxNormalizer results in a zero success rate in DPFM. Hihghly suspect there's a bug here.
     # Do not use for now.
-    #NORM_MINMAX: MinMaxNormalizer,
+    NORM_MINMAX: MinMaxNormalizer,
     NORM_IDENTITY: IdentityNormalizer,
 }
 

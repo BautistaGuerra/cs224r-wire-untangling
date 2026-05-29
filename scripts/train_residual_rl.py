@@ -16,6 +16,8 @@ from collections import deque
 import numpy as np
 import yaml
 import torch
+from tensordict import TensorDict
+from torchrl.data import LazyTensorStorage, TensorDictPrioritizedReplayBuffer
 
 from robosuite.wrappers import GymWrapper
 
@@ -23,6 +25,7 @@ from wire_untangling.envs import StickReorderEnv
 from wire_untangling.policies.rl.agent import TD3Agent
 from wire_untangling.policies.policy_inference_wrappers import DPFMModelPolicy, ResidualRLPolicy
 from wire_untangling.utils.normalizer import Normalizer, DEFAULT_SCALE_OBSERVATIONS, DEFAULT_SCALE_ACTIONS
+from wire_untangling.utils.rb_transforms import MultiStepTransform
 import scripts.rrl_env_creation as rrl_env
 
 # ── Config loading ───────────────────────────────────────────────────────────
@@ -54,50 +57,165 @@ def make_gym_env(env_cfg: dict):
     return GymWrapper(raw_env)
 
 
-# ── Replay buffer ───────────────────────────────────────────────────────────
 
-class ReplayBuffer:
-    """Simple numpy replay buffer storing flat tensors."""
+def add_transition_to_buffer(
+    rb: TensorDictPrioritizedReplayBuffer,
+    obs: np.ndarray,
+    action: np.ndarray,
+    action_base: np.ndarray,
+    next_obs: np.ndarray,
+    next_action_base: np.ndarray,
+    reward: float,
+    done: bool,
+):
+    """Helper function taht adds a single transition to the replay buffer as a TensorDict.
+    """
+    td = TensorDict(
+        {
+            "obs": torch.tensor(obs, dtype=torch.float32),
+            "action": torch.tensor(action, dtype=torch.float32),
+            "action_base": torch.tensor(action_base, dtype=torch.float32),
+            "next": TensorDict(
+                {
+                    "obs": torch.tensor(next_obs, dtype=torch.float32),
+                    "action_base": torch.tensor(next_action_base, dtype=torch.float32),
+                    "done": torch.tensor(done, dtype=torch.bool),
+                    "reward": torch.tensor(reward, dtype=torch.float32),
+                },
+                batch_size=[],
+            ),
+            "_priority": torch.tensor(10.0, dtype=torch.float32),
+        },
+        batch_size=[],
+    ).unsqueeze(0)
+    rb.add(td)
 
-    def __init__(self, obs_dim: int, action_dim: int, max_size: int):
-        self.max_size = max_size
-        self.ptr = 0
-        self.size = 0
 
-        self.obs = np.zeros((max_size, obs_dim), dtype=np.float32)
-        self.action = np.zeros((max_size, action_dim), dtype=np.float32)
-        self.action_base = np.zeros((max_size, action_dim), dtype=np.float32)
-        self.next_obs = np.zeros((max_size, obs_dim), dtype=np.float32)
-        self.next_action_base = np.zeros((max_size, action_dim), dtype=np.float32)
-        self.reward = np.zeros(max_size, dtype=np.float32)
-        self.done = np.zeros(max_size, dtype=np.float32)
-        self.gamma = np.zeros(max_size, dtype=np.float32)
+def make_replay_buffer(buffer_size: int, batch_size: int, n_step: int, gamma: float):
+    """Create a TensorDictPrioritizedReplayBuffer with TD(n_step) transform.
+    """
+    return TensorDictPrioritizedReplayBuffer(
+        storage=LazyTensorStorage(max_size=buffer_size, device="cpu"),
+        alpha=0.0,  # uniform sampling (no prioritization for now)
+        beta=0.0,
+        eps=1e-6,
+        priority_key="_priority",
+        transform=MultiStepTransform(n_steps=n_step, gamma=gamma),
+        pin_memory=True,
+        batch_size=batch_size,
+    )
 
-    def add(self, obs, action, action_base, next_obs, next_action_base, reward, done, gamma):
-        self.obs[self.ptr] = obs
-        self.action[self.ptr] = action
-        self.action_base[self.ptr] = action_base
-        self.next_obs[self.ptr] = next_obs
-        self.next_action_base[self.ptr] = next_action_base
-        self.reward[self.ptr] = reward
-        self.done[self.ptr] = done
-        self.gamma[self.ptr] = gamma
 
-        self.ptr = (self.ptr + 1) % self.max_size
-        self.size = min(self.size + 1, self.max_size)
+# ── Offline buffer population ───────────────────────────────────────────────
+# Ref: train_residual_td3.py:513-631 (_populate_offline_buffer)
 
-    def sample(self, batch_size: int, device: torch.device) -> dict[str, torch.Tensor]:
-        idx = np.random.randint(0, self.size, size=batch_size)
-        return {
-            "obs": torch.tensor(self.obs[idx], dtype=torch.float32, device=device),
-            "action": torch.tensor(self.action[idx], dtype=torch.float32, device=device),
-            "action_base": torch.tensor(self.action_base[idx], dtype=torch.float32, device=device),
-            "next_obs": torch.tensor(self.next_obs[idx], dtype=torch.float32, device=device),
-            "next_action_base": torch.tensor(self.next_action_base[idx], dtype=torch.float32, device=device),
-            "next_reward": torch.tensor(self.reward[idx], dtype=torch.float32, device=device),
-            "next_done": torch.tensor(self.done[idx], dtype=torch.float32, device=device),
-            "gamma": torch.tensor(self.gamma[idx], dtype=torch.float32, device=device),
-        }
+def populate_offline_buffer(
+    demos_path: str,
+    offline_rb: TensorDictPrioritizedReplayBuffer,
+    base_policy: DPFMModelPolicy,
+    obs_norm,
+    action_norm,
+    gamma: float,
+    max_transitions: int | None = None,
+):
+    """Load demonstrations from HDF5 and fill the offline buffer with normalized transitions.
+
+    For each demo timestep:
+    - runs the frozen base policy to get base_action (what it would predict for that observation). Stores the GT demo action as the executed
+    action. This teaches the critic the value landscape around demonstrated behavior.
+
+    Ref: train_residual_td3.py:513-631
+    """
+    import h5py
+
+    print("Populating offline buffer from demos...")
+    transitions = 0
+
+    with h5py.File(demos_path, "r") as f:
+        data_grp = f["data"]
+        num_episodes = len(data_grp.keys())
+        for ep_idx, ep_key in enumerate(sorted(data_grp.keys())):
+            if max_transitions is not None and transitions >= max_transitions:
+                print(f"  Reached max_transitions={max_transitions}, stopping.")
+                break
+            if (ep_idx + 1) % 50 == 0 or ep_idx == 0:
+                print(f"  Episode {ep_idx + 1}/{num_episodes} ({transitions} transitions so far)")
+            demo = data_grp[ep_key]
+            obs_all = demo["obs"][:]
+            actions_all = demo["actions"][:]
+            rewards_all = demo["rewards"][:]
+            T = len(obs_all)
+
+            # Reset the base policy at the start of each episode so its
+            # action chunk state is fresh (matches how it would run online).
+            base_policy.reset()
+
+            nobs = obs_norm.normalize(obs_all[0])
+            # Get base policy's action for this observation.
+            # predict_norm advances the chunk counter by 1, matching online behavior.
+            _, base_naction = base_policy.predict_norm(obs_all[0])
+            # GT action from the demonstration (normalized)
+            gt_naction = action_norm.normalize(actions_all[0])
+            reward = float(rewards_all[0])
+            # 1st state can't be a terminal state!
+            assert not demo["dones"][0]
+            done = demo["dones"][0]
+
+            for t in range(1, T):
+                # We must advance the base policy only once per step. It maintainss the internal chunk
+                # buffer, so we must call predict_norm exactly once per replay advance.
+                # So here we maintain a "rolling window" of the (previous, current) observations and actions.
+                next_nobs = obs_norm.normalize(obs_all[t])
+                _, next_base_naction = base_policy.predict_norm(obs_all[t])
+
+                # We add to the buffer results of the "previous" step as current observation/action,
+                # and the currently sampled obs/action as the next obs/action
+                add_transition_to_buffer(
+                    rb=offline_rb,
+                    obs=nobs,
+                    action=gt_naction,
+                    action_base=base_naction,
+                    next_obs=next_nobs,
+                    next_action_base=next_base_naction,
+                    reward=reward,
+                    done=done,
+                )
+                # Save data into the "current" step
+                nobs = next_nobs
+                base_naction = next_base_naction
+                gt_naction = action_norm.normalize(actions_all[t])
+                reward = float(rewards_all[t])
+                done = demo["dones"][t]
+                transitions += 1
+
+            # This is the terminal state.  We must do exactly one more advance to account for a final step.
+            assert done
+            add_transition_to_buffer(
+                rb=offline_rb,
+                obs=nobs,
+                action=gt_naction,
+                action_base=base_naction,
+                next_obs=np.zeros_like(next_nobs),
+                next_action_base=np.zeros_like(next_base_naction),
+                reward=reward,
+                done=done
+            )
+            transitions += 1
+
+
+    print(f"Offline buffer populated: {transitions} transitions from {num_episodes} episodes")
+    return transitions
+
+
+def sample_buffers(offline_buffer, replay_buffer, offline_fraction, device):
+    """Sample a batch of data from a mix of offline buffer and replay buffer."""
+    if offline_buffer is not None and offline_fraction > 0.0:
+        online_batch = replay_buffer.sample().to(device)
+        offline_batch = offline_buffer.sample().to(device)
+        batch = torch.cat([online_batch, offline_batch], dim=0)
+    else:
+        batch = replay_buffer.sample().to(device)
+    return batch
 
 
 # ── Noise schedule ──────────────────────────────────────────────────────────
@@ -107,8 +225,6 @@ def linear_schedule(step: int, max_val: float, min_val: float, decay_steps: int)
     frac = min(1.0, step / max(decay_steps, 1))
     return max_val + frac * (min_val - max_val)
 
-
-# ── Training loop ───────────────────────────────────────────────────────────
 
 def train(
     config: dict,
@@ -137,16 +253,60 @@ def train(
     state_dim = int(base_policy.obs_norm.loc.shape[0])
     action_dim = int(base_policy.action_dim)
 
-    # Create TD3 agent
-    td3_raw["state_dim"] = (state_dim,)
-    td3_raw["action_dim"] = (action_dim,)
+    # Create TD3 agent. We expect that during the training configured action/state dimensions
+    if td3_raw["state_dim"] is None:
+        td3_raw["state_dim"]= state_dim
+    else:
+        assert td3_raw["state_dim"] == state_dim
+
+    if td3_raw["action_dim"] is None:
+        td3_raw["action_dim"] = action_dim
+    else:
+        assert td3_raw["action_dim"] == action_dim
     td3_cfg = DictConfig(td3_raw)
     agent = TD3Agent(td3_cfg)
 
-    # Replay buffer holds transitions in normalized space
-    replay_buffer = ReplayBuffer(
-        obs_dim=state_dim, action_dim=action_dim, max_size=td3_cfg.replay_buffer_size
+    # Set up replay buffers
+    offline_fraction = float(td3_raw.get("offline_fraction", 0.0))
+    offline_demos_path = td3_raw.get("offline_demos_path")
+    online_batch_size = int(td3_cfg.batch_size * (1 - offline_fraction))
+    offline_batch_size = td3_cfg.batch_size - online_batch_size
+
+    # Online buffer — filled during training rollouts
+    replay_buffer = make_replay_buffer(
+        buffer_size=td3_cfg.replay_buffer_size,
+        batch_size=online_batch_size,
+        n_step=td3_cfg.n_step,
+        gamma=td3_cfg.gamma,
     )
+
+    # Offline buffer — filled from demo data before training starts
+    offline_buffer = None
+    if offline_fraction > 0.0 and offline_demos_path is not None:
+        offline_buffer = make_replay_buffer(
+            buffer_size=td3_cfg.replay_buffer_size,
+            batch_size=offline_batch_size,
+            n_step=td3_cfg.n_step,
+            gamma=td3_cfg.gamma,
+        )
+        offline_max = td3_raw.get("offline_max_transitions")
+        if offline_max is not None:
+            offline_max = int(offline_max)
+        populate_offline_buffer(
+            demos_path=offline_demos_path,
+            offline_rb=offline_buffer,
+            base_policy=base_policy,
+            obs_norm=obs_norm,
+            action_norm=action_norm,
+            gamma=td3_cfg.gamma,
+            max_transitions=offline_max,
+        )
+        # Reset base policy after offline population so online rollouts start fresh
+        base_policy.reset()
+        print(f"Mixed training: {online_batch_size} online + {offline_batch_size} offline per batch")
+    elif offline_fraction > 0.0:
+        print(f"WARNING: offline_fraction={offline_fraction} but no offline_demos_path set. Running online-only.")
+        offline_fraction = 0.0
 
     # Logging / checkpointing intervals
     log_freq = 1000
@@ -186,9 +346,12 @@ def train(
     # Query the base policy once for the initial action; subsequent steps
     # reuse next_base_naction to avoid advancing the chunk index twice per step.
     base_naction = None
-    stddev = td3_cfg.stddev_max
+
+    exploration_stddev = td3_cfg.exploration_stddev_max
+    critic_smoothing_stddev = td3_cfg.smoothing_stddev_max
 
     while global_step < td3_cfg.total_timesteps:
+        # A policy rollout (i.e. "exploration") phase.
         nobs = obs_norm.normalize(obs_raw)
         # Only query the base policy on the first step or after an episode reset
         if base_naction is None:
@@ -205,9 +368,9 @@ def train(
             combined_action, _, _ = ResidualRLPolicy.combine_actions(action_norm, base_naction, residual_naction)
         else:
             # Decay exploration noise linearly over training
-            stddev = linear_schedule(
+            exploration_stddev = linear_schedule(
                 global_step - td3_cfg.learning_starts,
-                td3_cfg.stddev_max, td3_cfg.stddev_min, td3_cfg.stddev_decay_steps,
+                td3_cfg.exploration_stddev_max, td3_cfg.exploration_stddev_min, td3_cfg.exploration_stddev_decay_steps,
             )
             with torch.no_grad():
                 # Sample a residual action from the agent.
@@ -215,7 +378,8 @@ def train(
                     torch.tensor(nobs, dtype=torch.float32, device=device),
                     torch.tensor(base_naction, dtype=torch.float32, device=device),
                     eval_mode=False,
-                    stddev=stddev,
+                    stddev=exploration_stddev,
+                    clip=td3_cfg.exploration_stddev_clip
                 ).numpy()
                 # Combine the residual action with the base action from BC policy and denormalize it.
                 combined_action, _, _ = ResidualRLPolicy.combine_actions(action_norm, base_naction, residual_naction)
@@ -236,16 +400,16 @@ def train(
         else:
             _, next_base_naction = base_policy.predict_norm(next_obs_raw)
 
-        # Store the transition — everything is in z-score normalized space
-        replay_buffer.add(
+        # Store the transition — everything is in normalized space
+        add_transition_to_buffer(
+            rb=replay_buffer,
             obs=nobs,
-            action=base_naction+residual_naction,
+            action=TD3Agent.get_combined_action_numpy(base_naction, residual_naction),
             action_base=base_naction,
             next_obs=next_nobs,
             next_action_base=next_base_naction,
             reward=reward,
-            done=float(done),
-            gamma=td3_cfg.gamma,
+            done=done,
         )
 
         # Handle episode resets and carry forward the next base action
@@ -262,25 +426,32 @@ def train(
 
         global_step += 1
 
-        # Gradient updates: start after warmup, every update_every_n_steps
+        # Gradient updates phase: start after warmup, every update_every_n_steps
         metrics = None
-        if global_step >= td3_cfg.learning_starts and global_step % td3_cfg.update_every_n_steps == 0:
-            # Allow std. deviation of actions to be high initially then diminish
-            stddev = linear_schedule(
-                global_step - td3_cfg.learning_starts,
-                td3_cfg.stddev_max, td3_cfg.stddev_min, td3_cfg.stddev_decay_steps,
-            )
-            batch = replay_buffer.sample(td3_cfg.batch_size, device)
-
-            # Delayed policy update: critic trains every step, actor only every N critic updates
-            update_actor = (
-                critic_updates >= td3_cfg.critic_warmup_steps
-                and critic_updates % td3_cfg.actor_update_every == 0
-            )
-            agent.train()
-            metrics = agent.update(batch, update_actor=update_actor, stddev=stddev)
-            agent.eval()
-            critic_updates += 1
+        if global_step >= td3_cfg.learning_starts and global_step % td3_cfg.gradient_update_per_env_steps == 0:
+            for _ in range(td3_cfg.critic_updates_per_gradient_step):
+                # Allow std. deviation of actions to be high initially then diminish
+                critic_smoothing_stddev = linear_schedule(
+                    global_step - td3_cfg.learning_starts,
+                    td3_cfg.smoothing_stddev_max, td3_cfg.smoothing_stddev_min, td3_cfg.critic_stddev_decay_steps,
+                )
+                # Sample a batch of data from both offline and online buffers
+                batch = sample_buffers(offline_buffer, replay_buffer, offline_fraction, device)
+                agent.train()
+                metrics = agent.update(batch, update_critic=True, update_actor=False, critic_smoothing_stddev=critic_smoothing_stddev)
+                agent.eval()
+                critic_updates += 1
+            if critic_updates >= td3_cfg.critic_warmup_steps:
+                for _ in range(td3_cfg.actor_updates_per_gradient_step):
+                    # Note: unlike ResFiT we sample a different batch for training the actor
+                    batch = sample_buffers(offline_buffer, replay_buffer, offline_fraction, device)
+                    agent.train()
+                    actor_metrics = agent.update(batch, update_critic=False, update_actor=True, critic_smoothing_stddev=critic_smoothing_stddev)
+                    agent.eval()
+                    if metrics is not None:
+                        metrics.update(actor_metrics)
+                    else:
+                        metrics = actor_metrics
 
         # Periodic console + wandb logging
         if global_step % log_freq == 0 and global_step > 0:
@@ -313,10 +484,12 @@ def train(
                     "training/global_step": global_step,
                     "training/episodes": episode_count,
                     "training/mean_episode_reward": mean_reward,
-                    "training/stddev": stddev if global_step >= td3_cfg.learning_starts else td3_cfg.stddev_max,
+                    "training/exploration_stddev": exploration_stddev,
+                    "training/critic_smoothing_stddev": critic_smoothing_stddev,
                     "training/SPS": sps,
                     "training/actor_lr": agent.actor_opt.param_groups[0]["lr"],
-                    "buffer/size": replay_buffer.size,
+                    "buffer/online_size": len(replay_buffer),
+                    "buffer/offline_size": len(offline_buffer) if offline_buffer is not None else 0,
                     "buffer/critic_updates": critic_updates,
                 }
                 if metrics is not None:
@@ -380,14 +553,44 @@ def main():
                         help="Path to trained DPFM checkpoint (.pt)")
     parser.add_argument("--num-sticks", type=int, default=None,
                         help="Override num_sticks from env config (currently only 1 is supported)")
+    parser.add_argument("--reward-shaping", action=argparse.BooleanOptionalAction, default=None,
+                        help="Override reward_shaping from env config (--reward-shaping / --no-reward-shaping)")
+    parser.add_argument("--demos-path", type=str, default=None,
+                        help="Override offline_demos_path from config")
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--no-wandb", action="store_true")
     parser.add_argument("--checkpoint-dir", default="checkpoints/td3")
+    # Hyperparameter overrides
+    parser.add_argument("--action-scale", type=float, default=None, help="Override actor.action_scale")
+    parser.add_argument("--actor-lr", type=float, default=None, help="Override actor.lr")
+    parser.add_argument("--critic-lr", type=float, default=None, help="Override critic.lr")
+    parser.add_argument("--actor-hidden-dims", type=int, nargs="+", default=None,
+                        help="Override actor.hidden_dims (sequence of layer widths, e.g. 512 512)")
+    parser.add_argument("--critic-hidden-dims", type=int, nargs="+", default=None,
+                        help="Override critic.hidden_dims (sequence of layer widths, e.g. 512 512)")
+    parser.add_argument("--offline-fraction", type=float, default=None, help="Override offline_fraction")
     args = parser.parse_args()
 
     cfg = load_config(args.env_config, args.td3_config)
+    if args.demos_path is not None:
+        cfg.setdefault("residual_td3", {})["offline_demos_path"] = args.demos_path
     if args.num_sticks is not None:
         cfg["env"]["num_sticks"] = args.num_sticks
+    if args.reward_shaping is not None:
+        cfg["env"]["reward_shaping"] = args.reward_shaping
+    td3 = cfg.setdefault("residual_td3", {})
+    if args.action_scale is not None:
+        td3.setdefault("actor", {})["action_scale"] = args.action_scale
+    if args.actor_lr is not None:
+        td3.setdefault("actor", {})["lr"] = args.actor_lr
+    if args.critic_lr is not None:
+        td3.setdefault("critic", {})["lr"] = args.critic_lr
+    if args.actor_hidden_dims is not None:
+        td3.setdefault("actor", {})["hidden_dims"] = args.actor_hidden_dims
+    if args.critic_hidden_dims is not None:
+        td3.setdefault("critic", {})["hidden_dims"] = args.critic_hidden_dims
+    if args.offline_fraction is not None:
+        td3["offline_fraction"] = args.offline_fraction
     seed = args.seed if args.seed is not None else 42
 
     train(
