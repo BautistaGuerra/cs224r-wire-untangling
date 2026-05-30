@@ -9,7 +9,8 @@ DEMOS="data/demos.hdf5"
 BASE_DIR="checkpoints/sweep_dpfm"
 EVAL_EPISODES=100
 
-NORMALIZERS=("zscore" "minmax" "identity")
+#NORMALIZERS=("zscore" "minmax" "identity")
+NORMALIZERS=("minmax")
 HORIZONS=(8 16)
 EXEC_STEPS=(4 8)
 INTEGRATION_STEPS=(10 20)

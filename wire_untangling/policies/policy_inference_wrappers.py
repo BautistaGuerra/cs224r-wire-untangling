@@ -220,7 +220,7 @@ class DPFMModelPolicy(ModelPolicy):
 class ResidualRLPolicy(ModelPolicy):
     """A residual RL policy. Incorporates the base behavior cloning policy."""
 
-    def __init__(self, rl_model_path: str, base_model_path: str, base_policy: ModelPolicy, gym_env, rrl_cfg):
+    def __init__(self, rl_model_path: str, base_model_path: str, base_policy: ModelPolicy, gym_env, rrl_cfg=None):
         super().__init__(rl_model_path, gym_env)
         print('')
         print('Initializing the ResidualRL policy')
@@ -229,14 +229,28 @@ class ResidualRLPolicy(ModelPolicy):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.base_policy = base_policy
 
-        # Note: we assume that the checkpoint contains both the RL model as well as
-        checkpoint = torch.load(base_model_path, map_location=self.device, weights_only=True)
-        self.action_dim = (int(checkpoint["action_dim"]))
-        self.state_dim = (int(checkpoint["state_dim"]))
-        rrl_cfg.state_dim =self.state_dim
-        rrl_cfg.action_dim = self.action_dim
+        base_checkpoint = torch.load(base_model_path, map_location=self.device, weights_only=True)
+        self.action_dim = int(base_checkpoint["action_dim"])
+        self.state_dim = int(base_checkpoint["state_dim"])
 
         rl_checkpoint = torch.load(rl_model_path, map_location=self.device, weights_only=True)
+        if "rrl_config" in rl_checkpoint:
+            from scripts.train_residual_rl import DictConfig
+            saved_raw = rl_checkpoint["rrl_config"]
+            if saved_raw["state_dim"] != self.state_dim:
+                raise ValueError(f"State dimensions for the base policy ({self.state_dim}) do not match state dimensions for the residual policy ({saved_raw['state_dim']})")
+            if saved_raw["action_dim"] != self.action_dim:
+                raise ValueError(f"Action dimensions for the base policy ({self.action_dim}) do not match action dimensions for the residual policy ({saved_raw['action_dim']})")
+            rrl_cfg = DictConfig(saved_raw)
+        elif rrl_cfg is not None:
+            rrl_cfg.state_dim = self.state_dim
+            rrl_cfg.action_dim = self.action_dim
+        else:
+            raise ValueError(
+                "RRL checkpoint does not contain 'rrl_config' and no rrl_cfg was provided. "
+                "Re-train or pass --rrl-config with matching hyperparameters."
+            )
+
         # Use exactly the same normalizers as the base policy
         self.obs_norm = self.base_policy.obs_norm
         self.action_norm = self.base_policy.action_norm

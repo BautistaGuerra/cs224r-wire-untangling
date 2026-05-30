@@ -45,7 +45,7 @@ def _make_writer(path: str, fps: int):
 
 
 def _grab_frame(env):
-    return env.sim.render(width=1280, height=720, camera_name="agentview")[::-1]
+    return env.sim.render(width=1280, height=720, camera_name="frontview")[::-1]
 
 
 def load_config(path: str) -> dict:
@@ -291,15 +291,22 @@ if __name__ == "__main__":
                         help="Use random Flow Matching initial noise instead of deterministic zero-noise sampling")
     parser.add_argument("--rrl-checkpoint", type=str, default=None,
                         help="Path to residual RL (TD3) checkpoint (.pt)")
-    parser.add_argument("--rrl-config", type=str, default="configs/residual_td3.yaml",
-                        help="Path to residual TD3 YAML config")
+    parser.add_argument("--rrl-config", type=str, default=None,
+                        help="Path to residual TD3 YAML config (optional for checkpoints that embed config)")
+    parser.add_argument("--action-scale", type=float, default=None,
+                        help="Override actor.action_scale for the RRL policy (only needed with --rrl-config)")
     parser.add_argument("--expert", action="store_true", help="Run scripted pick-and-place expert (single stick)")
     parser.add_argument("--num-sticks", type=int, default=None, help="Override number of sticks")
+    parser.add_argument("--reward-shaping", action=argparse.BooleanOptionalAction, default=None,
+                        help="Override reward_shaping from env config (--reward-shaping / --no-reward-shaping)")
     args = parser.parse_args()
 
     cfg = load_config(args.config) if args.config else {}
     env_cfg = cfg.get("env", {})
     expert_cfg = cfg.get("expert", {})
+
+    if args.reward_shaping is not None:
+        env_cfg["reward_shaping"] = args.reward_shaping
 
     if args.num_sticks is not None:
         num_sticks = args.num_sticks
@@ -338,15 +345,17 @@ if __name__ == "__main__":
         )
         run_policy(env, policy, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record, results_file=args.results_file)
     elif args.rrl_checkpoint:
-        from scripts.train_residual_rl import DictConfig
         if not args.dpfm_checkpoint:
             parser.error("--rrl-checkpoint requires --dpfm_checkpoint (the base DPFM policy)")
-        with open(args.rrl_config) as f:
-            rrl_raw = yaml.safe_load(f).get("residual_td3", {})
         base_policy = DPFMModelPolicy(args.dpfm_checkpoint, env, stochastic=args.dpfm_stochastic)
-        rrl_raw["state_dim"] = (int(base_policy.state_dim),)
-        rrl_raw["action_dim"] = (int(base_policy.action_dim),)
-        rrl_cfg = DictConfig(rrl_raw)
+        rrl_cfg = None
+        if args.rrl_config:
+            from scripts.train_residual_rl import DictConfig
+            with open(args.rrl_config) as f:
+                rrl_raw = yaml.safe_load(f).get("residual_td3", {})
+            if args.action_scale is not None:
+                rrl_raw.setdefault("actor", {})["action_scale"] = args.action_scale
+            rrl_cfg = DictConfig(rrl_raw)
         policy = ResidualRLPolicy(
             rl_model_path=args.rrl_checkpoint,
             base_model_path=args.dpfm_checkpoint,

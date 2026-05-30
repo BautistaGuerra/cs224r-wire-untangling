@@ -518,6 +518,7 @@ def train(
                 "global_step": global_step,
                 "obs_norm": obs_norm.state_dict(),
                 "action_norm": action_norm.state_dict(),
+                "rrl_config": td3_raw,
             }, save_path)
             print(f"  Checkpoint saved: {save_path}")
 
@@ -530,6 +531,7 @@ def train(
         "global_step": global_step,
         "obs_norm": obs_norm.state_dict(),
         "action_norm": action_norm.state_dict(),
+        "rrl_config": td3_raw,
     }, save_path)
     print(f"Final model saved: {save_path}")
 

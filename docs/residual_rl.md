@@ -188,6 +188,71 @@ python -m scripts.play_env --config configs/stick_reorder.yaml \
 Experiment results and run metadata are tracked in `docs/rrl_runs.csv` and on
 WandB (entity `alexta-uw`, project `cs224r-wire-untangling`).
 
+## Sweep results (Phase 5 — large networks, 512×512)
+
+All runs share: `[512, 512]` actor/critic hidden dims, actor_lr=5e-6,
+critic_lr=1e-4, 4 critics, n_step=3, gamma=0.97, offline_fraction=0.5,
+base DPFM checkpoint `checkpoints/sweep_dpfm/norm_minmax_h8_e4_i20/flow_matching_policy.pt`.
+
+### Training commands
+
+**Baseline — action_scale=0.2, dense reward, UTD=4** (silvery-gorge-77, [wandb](https://wandb.ai/alexta-uw/cs224r-wire-untangling/runs/ctes47gj)):
+```bash
+python -m scripts.train_residual_rl \
+    --dpfm-checkpoint checkpoints/sweep_dpfm/norm_minmax_h8_e4_i20/flow_matching_policy.pt \
+    --action-scale 0.2 --offline-fraction 0.5 \
+    --checkpoint-dir checkpoints/dpfm_actlr5e-6_crtlr1e-4_h512 \
+    --num-sticks 1 --demos-path data/demos.hdf5
+```
+
+**action_scale=0.3** (valiant-sea-78, [wandb](https://wandb.ai/alexta-uw/cs224r-wire-untangling/runs/crezep81)):
+```bash
+python -m scripts.train_residual_rl \
+    --dpfm-checkpoint checkpoints/sweep_dpfm/norm_minmax_h8_e4_i20/flow_matching_policy.pt \
+    --action-scale 0.3 --offline-fraction 0.5 \
+    --checkpoint-dir checkpoints/dpfm_actlr5e-6_crtlr1e-4_h512_a0.3 \
+    --num-sticks 1 --demos-path data/demos.hdf5
+```
+
+**UTD=1 (4 env steps per gradient update)** (glorious-disco-80, [wandb](https://wandb.ai/alexta-uw/cs224r-wire-untangling/runs/idw7odys)):
+```bash
+# Requires modified configs/residual_td3.yaml with:
+#   gradient_update_per_env_steps: 4
+#   total_timesteps: 1000000
+#   learning_starts: 35000
+#   critic_warmup_steps: 35000
+#   critic_stddev_decay_steps: 1000000
+#   exploration_stddev_decay_steps: 600000
+python -m scripts.train_residual_rl \
+    --dpfm-checkpoint checkpoints/sweep_dpfm/norm_minmax_h8_e4_i20/flow_matching_policy.pt \
+    --action-scale 0.2 --offline-fraction 0.5 \
+    --checkpoint-dir checkpoints/dpfm_actlr5e-6_crtlr1e-4_h512_utd0.25 \
+    --num-sticks 1 --demos-path data/demos.hdf5
+```
+
+**Sparse reward (no shaping)** (sage-bee-79, [wandb](https://wandb.ai/alexta-uw/cs224r-wire-untangling/runs/r0f00lyd)):
+```bash
+python -m scripts.train_residual_rl \
+    --dpfm-checkpoint checkpoints/sweep_dpfm/norm_minmax_h8_e4_i20/flow_matching_policy.pt \
+    --action-scale 0.2 --offline-fraction 0.5 \
+    --checkpoint-dir checkpoints/dpfm_actlr5e-6_crtlr1e-4_h512_noshape \
+    --no-reward-shaping --num-sticks 1 --demos-path data/demos.hdf5
+```
+
+### Evaluation results
+
+Each configuration was evaluated 3× with 100 episodes per run. Success rate
+averaged over 300 episodes. Baseline: silvery-gorge-77 (dense, scale=0.2, UTD=4).
+
+| Run | Reward Type | Action Scale | Critic UTD | Avg Success Rate | Fisher p vs baseline |
+|-----|-------------|-------------|------------|-----------------|---------------------|
+| silvery-gorge-77 (baseline) | dense | 0.2 | 4 | **99.0%** | — |
+| valiant-sea-78 | dense | 0.3 | 4 | 97.0% | p=0.142 (not sig.) |
+| glorious-disco-80 | dense | 0.2 | 1 | 97.3% | p=0.222 (not sig.) |
+| sage-bee-79 | sparse | 0.2 | 4 | 95.0% | p=0.007 (sig. at α=0.05) |
+
+Full metrics in `docs/rrl_sweep_summary.csv`.
+
 ## Context for AI assistants
 
 If you are an AI assistant picking up this work, orient here first:
