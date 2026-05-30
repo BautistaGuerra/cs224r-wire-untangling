@@ -134,7 +134,14 @@ class MLPBCModelPolicy(ModelPolicy):
 
 
 class DPFMModelPolicy(ModelPolicy):
-    def __init__(self, model_path: str, gym_env, execute_steps: int | None = None, stochastic: bool = True):
+    def __init__(
+        self,
+        model_path: str,
+        gym_env,
+        execute_steps: int | None = None,
+        stochastic: bool = True,
+        replan_on_context_change: bool = False,
+    ):
         super().__init__(model_path, gym_env)
         self.gym_env = gym_env
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -156,11 +163,13 @@ class DPFMModelPolicy(ModelPolicy):
         )
         self.execute_steps = max(1, min(self.execute_steps, self.pred_horizon))
         self.stochastic = stochastic
+        self.replan_on_context_change = replan_on_context_change
 
         print(f'Integration steps: {self.num_integration_steps}')
         print(f'Prediction horizon: {self.pred_horizon}')
         print(f'Execution steps: {self.execute_steps}')
         print(f'Stochastic: {self.stochastic}')
+        print(f'Replan on context change: {self.replan_on_context_change}')
 
         assert "obs_norm" in checkpoint
         self.obs_norm = Normalizer.from_state_dict(checkpoint["obs_norm"])
@@ -181,6 +190,8 @@ class DPFMModelPolicy(ModelPolicy):
         # normalized chunk for residual RL
         self._nchunk = None
         self._chunk_idx = 0
+        self._chunk_context = None
+        self._last_built_state_context = None
 
     def set_gym_env(self, gym_env, expert_cfg: dict | None = None):
         if self.conditioning != "phase-active":
@@ -203,23 +214,29 @@ class DPFMModelPolicy(ModelPolicy):
         self._chunk = None
         self._nchunk = None
         self._chunk_idx = 0
+        self._chunk_context = None
+        self._last_built_state_context = None
         if self._phase_tracker is not None:
             self._phase_tracker.reset(stick_order=stick_order)
 
-    def _build_state(self, obs: np.ndarray) -> np.ndarray:
-        obs = np.asarray(obs, dtype=np.float32)
-        if self.conditioning == "obs":
-            return obs
-        if self.conditioning != "phase-active":
-            raise ValueError(f"Unsupported DPFM conditioning: {self.conditioning!r}")
+    def _current_phase_active_context(self) -> tuple[int, int]:
         if self._phase_tracker is None:
             raise RuntimeError(
                 "phase-active DPFM requires a GymWrapper-backed phase tracker; "
                 "run it via run_policy/play_env so set_gym_env() is called."
             )
+        return int(self._phase_tracker.phase), int(self._phase_tracker.active_stick)
 
-        phase = int(self._phase_tracker.phase)
-        active_stick = int(self._phase_tracker.active_stick)
+    def _build_state(self, obs: np.ndarray) -> np.ndarray:
+        obs = np.asarray(obs, dtype=np.float32)
+        if self.conditioning == "obs":
+            self._last_built_state_context = None
+            return obs
+        if self.conditioning != "phase-active":
+            raise ValueError(f"Unsupported DPFM conditioning: {self.conditioning!r}")
+
+        phase, active_stick = self._current_phase_active_context()
+        self._last_built_state_context = (phase, active_stick)
         self._phase_tracker.predict(obs)
         features = make_phase_active_features(
             phase,
@@ -237,6 +254,15 @@ class DPFMModelPolicy(ModelPolicy):
                     "run it via run_policy/play_env so set_gym_env() is called."
                 )
             self._phase_tracker.predict(obs)
+
+    def _cached_context_changed(self) -> bool:
+        if not getattr(self, "replan_on_context_change", False):
+            return False
+        if getattr(self, "conditioning", "obs") != "phase-active":
+            return False
+        if self._chunk is None or self._chunk_context is None:
+            return False
+        return self._current_phase_active_context() != self._chunk_context
 
     def _sample_chunk(self, obs: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         state_np = self._build_state(obs)
@@ -263,9 +289,12 @@ class DPFMModelPolicy(ModelPolicy):
     def predict_norm(self, obs: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """Predict both unnormalized, as well as normalized action. Normalized is used for residual RL."""
         needs_replan = self._chunk is None or self._chunk_idx >= min(self.execute_steps, self.pred_horizon)
+        if not needs_replan and self._cached_context_changed():
+            needs_replan = True
         if needs_replan:
             self._chunk, self._nchunk = self._sample_chunk(obs)
             self._chunk_idx = 0
+            self._chunk_context = getattr(self, "_last_built_state_context", None)
         else:
             self._advance_context_tracker(obs)
         action = self._chunk[self._chunk_idx]

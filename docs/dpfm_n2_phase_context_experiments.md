@@ -162,6 +162,26 @@ Recommended first runs:
 If boundary-aware `h8` works, it recovers more sequence modeling while avoiding
 cross-phase supervision.
 
+Implementation notes:
+
+- Boundary-aware chunks are opt-in via `--phase-boundary-chunks` and are rejected
+  unless `--conditioning phase-active` is also set.
+- Default DPFM training still chunks by full episode and stores
+  `chunking="episode"` in the checkpoint. Boundary-aware runs store
+  `chunking="phase_boundary"`.
+- Training and validation checkpoints now include chunking diagnostics: segment
+  count, chunk count, padded-tail fraction, and mean/min/max segment length.
+- At a segment boundary, the remaining target actions are padded by repeating the
+  last action inside the current `(phase, active_stick)` segment. The masked
+  version stores `loss_masking="padded_tail"` and excludes those repeated tail
+  timesteps from the flow-matching loss. Default episode chunking still stores
+  `loss_masking="none"` and keeps the existing episode-end padding behavior.
+- Playback has an optional `--dpfm-replan-on-context-change` flag. When enabled,
+  a phase-active DPFM policy discards a cached sampled chunk before the next
+  cached action if the current tracked `(phase, active_stick)` differs from the
+  context used to sample that chunk. This is evaluation behavior only and is not
+  stored in checkpoints.
+
 ### 2. Per-Timestep Context Sequence
 
 This is a more principled architecture change. Instead of conditioning the

@@ -141,6 +141,7 @@ def train_flow_matching_remote(
     use_wandb: bool,
     action_normalizer: str,
     conditioning: str,
+    phase_boundary_chunks: bool,
     action_chunk_horizon: int | None,
     execute_steps: int | None,
     integration_steps: int | None,
@@ -183,6 +184,7 @@ def train_flow_matching_remote(
         checkpoint_dir=checkpoint_dir,
         action_normalizer_type=action_normalizer,
         conditioning=conditioning,
+        phase_boundary_chunks=phase_boundary_chunks,
         wandb_run_id=wandb_run_id or None,
         wandb_name=wandb_name or None,
     )
@@ -200,6 +202,7 @@ def main(
     no_wandb: bool = False,
     action_normalizer: str = "zscore",
     conditioning: str = "obs",
+    phase_boundary_chunks: bool = False,
     action_chunk_horizon: int | None = 8,
     execute_steps: int | None = 4,
     integration_steps: int | None = 20,
@@ -212,6 +215,8 @@ def main(
         raise ValueError("action_normalizer must be 'zscore', 'minmax', or 'identity'")
     if conditioning not in {"obs", "phase-active"}:
         raise ValueError("conditioning must be 'obs' or 'phase-active'")
+    if phase_boundary_chunks and conditioning != "phase-active":
+        raise ValueError("phase_boundary_chunks requires conditioning='phase-active'")
 
     if remote_demos_path:
         remote_demo = _volume_path(remote_demos_path, DATA_MOUNT, "data")
@@ -231,6 +236,7 @@ def main(
                     remote_checkpoint_dir,
                     action_normalizer,
                     conditioning,
+                    str(phase_boundary_chunks),
                     str(action_chunk_horizon),
                     str(execute_steps),
                     str(integration_steps),
@@ -258,6 +264,7 @@ def main(
     print(
         "Launching Modal DPFM training: "
         f"normalizer={action_normalizer}, conditioning={conditioning}, "
+        f"phase_boundary_chunks={phase_boundary_chunks}, "
         f"horizon={action_chunk_horizon}, "
         f"execute_steps={execute_steps}, integration_steps={integration_steps}, "
         f"seed={seed}, gpu={_GPU_TYPE}, demos={remote_demo}, "
@@ -272,6 +279,7 @@ def main(
         use_wandb=not no_wandb,
         action_normalizer=action_normalizer,
         conditioning=conditioning,
+        phase_boundary_chunks=phase_boundary_chunks,
         action_chunk_horizon=action_chunk_horizon,
         execute_steps=execute_steps,
         integration_steps=integration_steps,

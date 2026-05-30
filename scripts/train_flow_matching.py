@@ -18,6 +18,8 @@ from wire_untangling.utils.normalizer import (
 CONDITIONING_OBS = "obs"
 CONDITIONING_PHASE_ACTIVE = "phase-active"
 NUM_PHASES = 8
+CHUNKING_EPISODE = "episode"
+CHUNKING_PHASE_BOUNDARY = "phase_boundary"
 
 def load_config(
     env_config: str = "configs/stick_reorder.yaml",
@@ -85,11 +87,14 @@ def train(
     checkpoint_dir: str = "checkpoints",
     action_normalizer_type: str = "zscore",
     conditioning: str = CONDITIONING_OBS,
+    phase_boundary_chunks: bool = False,
     wandb_run_id: str | None = None,
     wandb_name: str | None = None,
 ):
     dpfm_cfg = config.get("dpfm", {})
     train_cfg = config.get("dpfm_train", {})
+    if phase_boundary_chunks and conditioning != CONDITIONING_PHASE_ACTIVE:
+        raise ValueError("--phase-boundary-chunks requires --conditioning phase-active")
 
     if seed is not None:
         random.seed(seed)
@@ -112,6 +117,7 @@ def train(
         action_low=action_low,
         action_high=action_high,
         conditioning=conditioning,
+        phase_boundary_chunks=phase_boundary_chunks,
         val_fraction=val_fraction,
         action_normalizer_type=action_normalizer_type,
     )
@@ -132,6 +138,10 @@ def train(
                 "raw_obs_dim": data_meta["raw_obs_dim"],
                 "num_phases": data_meta["num_phases"],
                 "num_sticks": data_meta["num_sticks"],
+                "chunking": data_meta["chunking"],
+                "loss_masking": data_meta["loss_masking"],
+                "train_chunking_diagnostics": data_meta["train_chunking_diagnostics"],
+                "val_chunking_diagnostics": data_meta["val_chunking_diagnostics"],
             },
             "tags": ["flow-matching", "bc"],
         }
@@ -154,19 +164,26 @@ def train(
 
     for epoch in range(epochs):
         total_loss = 0.0
-        n = 0
+        loss_units = 0.0
         # Train epoch
-        for s_batch, a_batch in train_loader:
+        for batch in train_loader:
+            if len(batch) == 3:
+                s_batch, a_batch, action_mask = batch
+                action_mask = action_mask.to(device)
+            else:
+                s_batch, a_batch = batch
+                action_mask = None
             s_batch = s_batch.to(device)
             a_batch = a_batch.to(device)
-            loss = flow_matching_loss(policy, s_batch, a_batch)
+            loss = flow_matching_loss(policy, s_batch, a_batch, action_mask=action_mask)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            total_loss += loss.item() * s_batch.size(0)
-            n += s_batch.size(0)
+            batch_units = float(action_mask.sum().item()) if action_mask is not None else float(a_batch.numel())
+            total_loss += loss.item() * batch_units
+            loss_units += batch_units
 
-        avg_loss = total_loss / n
+        avg_loss = total_loss / loss_units
         log_msg = f"  Epoch {epoch+1}/{epochs}, train_loss: {avg_loss:.6f}"
         log_dict = {"epoch": epoch + 1, "train_loss": avg_loss}
 
@@ -174,15 +191,22 @@ def train(
         if val_loader is not None:
             policy.eval()
             val_total = 0.0
-            val_n = 0
+            val_loss_units = 0.0
             with torch.no_grad():
-                for s_batch, a_batch in val_loader:
+                for batch in val_loader:
+                    if len(batch) == 3:
+                        s_batch, a_batch, action_mask = batch
+                        action_mask = action_mask.to(device)
+                    else:
+                        s_batch, a_batch = batch
+                        action_mask = None
                     s_batch = s_batch.to(device)
                     a_batch = a_batch.to(device)
-                    val_loss = flow_matching_loss(policy, s_batch, a_batch)
-                    val_total += val_loss.item() * s_batch.size(0)
-                    val_n += s_batch.size(0)
-            avg_val_loss = val_total / val_n
+                    val_loss = flow_matching_loss(policy, s_batch, a_batch, action_mask=action_mask)
+                    batch_units = float(action_mask.sum().item()) if action_mask is not None else float(a_batch.numel())
+                    val_total += val_loss.item() * batch_units
+                    val_loss_units += batch_units
+            avg_val_loss = val_total / val_loss_units
             log_msg += f", val_loss: {avg_val_loss:.6f}"
             log_dict["val_loss"] = avg_val_loss
             policy.train()
@@ -203,6 +227,10 @@ def train(
         "raw_obs_dim": data_meta["raw_obs_dim"],
         "num_phases": data_meta["num_phases"],
         "num_sticks": data_meta["num_sticks"],
+        "chunking": data_meta["chunking"],
+        "loss_masking": data_meta["loss_masking"],
+        "train_chunking_diagnostics": data_meta["train_chunking_diagnostics"],
+        "val_chunking_diagnostics": data_meta["val_chunking_diagnostics"],
         "obs_norm": obs_norm.state_dict(),
         "action_norm": action_norm.state_dict(),
     }, save_path)
@@ -301,6 +329,74 @@ def make_phase_active_features(
     return out
 
 
+def _phase_active_segment_bounds(
+    phases: np.ndarray,
+    active_sticks: np.ndarray,
+) -> list[tuple[int, int]]:
+    """Return contiguous [start, end) ranges with constant phase and active stick."""
+    phases = np.asarray(phases)
+    active_sticks = np.asarray(active_sticks)
+    if phases.shape != active_sticks.shape:
+        raise ValueError(
+            f"phase and active_stick shapes differ: {phases.shape} vs {active_sticks.shape}"
+        )
+    if len(phases) == 0:
+        return []
+
+    change_points = np.nonzero(
+        (phases[1:] != phases[:-1]) | (active_sticks[1:] != active_sticks[:-1])
+    )[0] + 1
+    starts = np.concatenate([[0], change_points])
+    ends = np.concatenate([change_points, [len(phases)]])
+    return [(int(start), int(end)) for start, end in zip(starts, ends)]
+
+
+def _chunking_diagnostics(
+    segment_lengths: list[int],
+    indices: np.ndarray,
+    chunk_size: int,
+) -> dict:
+    lengths = np.asarray(segment_lengths, dtype=np.int64)
+    num_chunks = int(len(indices))
+    if num_chunks:
+        padded_tail_chunks = int(np.sum(indices[:, 3] < chunk_size))
+        padded_tail_fraction = float(padded_tail_chunks / num_chunks)
+    else:
+        padded_tail_chunks = 0
+        padded_tail_fraction = 0.0
+
+    if len(lengths):
+        mean_segment_length = float(np.mean(lengths))
+        min_segment_length = int(np.min(lengths))
+        max_segment_length = int(np.max(lengths))
+    else:
+        mean_segment_length = 0.0
+        min_segment_length = 0
+        max_segment_length = 0
+
+    return {
+        "num_segments": int(len(lengths)),
+        "num_chunks": num_chunks,
+        "num_padded_tail_chunks": padded_tail_chunks,
+        "padded_tail_fraction": padded_tail_fraction,
+        "mean_segment_length": mean_segment_length,
+        "min_segment_length": min_segment_length,
+        "max_segment_length": max_segment_length,
+    }
+
+
+def _print_chunking_diagnostics(split: str, chunking: str, diagnostics: dict) -> None:
+    print(
+        f"{split} chunking diagnostics ({chunking}): "
+        f"segments={diagnostics['num_segments']}, "
+        f"chunks={diagnostics['num_chunks']}, "
+        f"padded_tail_fraction={diagnostics['padded_tail_fraction']:.3f}, "
+        f"segment_len_mean={diagnostics['mean_segment_length']:.1f}, "
+        f"segment_len_min={diagnostics['min_segment_length']}, "
+        f"segment_len_max={diagnostics['max_segment_length']}"
+    )
+
+
 def load_data(
     demo_path: str,
     chunk_size: int = 20,
@@ -309,6 +405,7 @@ def load_data(
     action_low: np.ndarray | None = None,
     action_high: np.ndarray | None = None,
     conditioning: str = CONDITIONING_OBS,
+    phase_boundary_chunks: bool = False,
     val_fraction: float = 0.0,
     action_normalizer_type: str = NORM_ZSCORE,
 ):
@@ -330,10 +427,13 @@ def load_data(
     """
     import h5py
 
+    if phase_boundary_chunks and conditioning != CONDITIONING_PHASE_ACTIVE:
+        raise ValueError("--phase-boundary-chunks requires --conditioning phase-active")
+
     all_obs = []
     all_actions = []
     all_features = []
-    episode_lengths = []
+    all_segment_bounds = []
     with h5py.File(demo_path, "r") as f:
         data_grp = f["data"]
         keys = sorted(data_grp.keys())
@@ -346,26 +446,36 @@ def load_data(
             actions = demo["actions"][:]
             all_obs.append(obs)
             all_actions.append(actions)
-            episode_lengths.append(len(obs))
+            all_segment_bounds.append([(0, len(obs))])
             if conditioning == CONDITIONING_PHASE_ACTIVE:
                 if "phase" not in demo or "active_stick" not in demo:
                     raise ValueError(
                         "--conditioning phase-active requires phase and active_stick "
                         f"datasets; missing in data/{key}"
                     )
+                phases = demo["phase"][:]
+                active_sticks = demo["active_stick"][:]
+                if len(phases) != len(obs) or len(active_sticks) != len(obs):
+                    raise ValueError(
+                        f"data/{key} phase/active_stick lengths must match obs length "
+                        f"{len(obs)}; got phase={len(phases)}, active_stick={len(active_sticks)}"
+                    )
                 all_features.append(
                     make_phase_active_features(
-                        demo["phase"][:],
-                        demo["active_stick"][:],
+                        phases,
+                        active_sticks,
                         num_sticks=num_sticks,
                     )
                 )
+                if phase_boundary_chunks:
+                    all_segment_bounds[-1] = _phase_active_segment_bounds(phases, active_sticks)
 
     num_episodes = len(all_obs)
     action_dim = all_actions[0].shape[1]
     for i, (obs, act) in enumerate(zip(all_obs, all_actions)):
         assert obs.shape[1] == raw_obs_dim, f"Demo {i}: obs_dim={obs.shape[1]} != {raw_obs_dim}"
         assert act.shape[1] == action_dim, f"Demo {i}: action_dim={act.shape[1]} != {action_dim}"
+        assert len(obs) == len(act), f"Demo {i}: obs length={len(obs)} != actions length={len(act)}"
 
     if conditioning == CONDITIONING_OBS:
         all_states = all_obs
@@ -409,53 +519,94 @@ def load_data(
         clip_low=action_low, clip_high=action_high,
     )
 
+    chunking = CHUNKING_PHASE_BOUNDARY if phase_boundary_chunks else CHUNKING_EPISODE
+    loss_masking = "padded_tail" if phase_boundary_chunks else "none"
+
     def _build_loader(ep_idxs: np.ndarray, all_states: list[np.ndarray], all_actions: list[np.ndarray],
-                      episode_lengths, shuffle:bool=True):
+                      all_segment_bounds: list[list[tuple[int, int]]], shuffle: bool = True):
         """Build a DataLoader from a subset of episodes.
 
         Args:
             ep_idxs: indices of the episodes that constitute this data loader (separate for train and eval)
             all_states, all_actions: numpy arrays of states / actions
         """
-        subset_states = [all_states[i] for i in ep_idxs]
-        subset_actions = [all_actions[i] for i in ep_idxs]
-        subset_lengths = [episode_lengths[i] for i in ep_idxs]
+        subset_states = []
+        subset_actions = []
+        segment_lengths = []
+        for i in ep_idxs:
+            for start, end in all_segment_bounds[i]:
+                if end <= start:
+                    continue
+                subset_states.append(all_states[i][start:end])
+                subset_actions.append(all_actions[i][start:end])
+                segment_lengths.append(end - start)
 
         flat_states = np.concatenate(subset_states, axis=0)
         flat_actions = np.concatenate(subset_actions, axis=0)
-        episode_ends = np.cumsum(subset_lengths)
-        indices = create_chunk_indices(episode_ends, chunk_size, pad_after=chunk_size - 1)
+        segment_ends = np.cumsum(segment_lengths)
+        indices = create_chunk_indices(segment_ends, chunk_size, pad_after=chunk_size - 1)
+        diagnostics = _chunking_diagnostics(segment_lengths, indices, chunk_size)
 
         chunked_states = []
         chunked_actions = []
+        chunked_masks = []
         for buf_start, buf_end, samp_start, samp_end in indices:
             state = obs_norm.normalize(flat_states[buf_start])
 
             action_chunk = np.zeros((chunk_size, action_dim), dtype=np.float32)
+            action_mask = np.zeros((chunk_size, action_dim), dtype=np.float32)
             action_slice = flat_actions[buf_start:buf_end]
             action_chunk[samp_start:samp_end] = action_slice
+            action_mask[samp_start:samp_end] = 1.0
             if samp_end < chunk_size:
                 action_chunk[samp_end:] = action_slice[-1]
             naction_chunk = action_norm.normalize(action_chunk)
 
             chunked_states.append(state)
             chunked_actions.append(naction_chunk.flatten())
+            if phase_boundary_chunks:
+                chunked_masks.append(action_mask.flatten())
 
         s_tensor = torch.tensor(np.array(chunked_states), dtype=torch.float32)
         a_tensor = torch.tensor(np.array(chunked_actions), dtype=torch.float32)
-        return DataLoader(TensorDataset(s_tensor, a_tensor), batch_size=batch_size, shuffle=shuffle)
+        if phase_boundary_chunks:
+            m_tensor = torch.tensor(np.array(chunked_masks), dtype=torch.float32)
+            dataset = TensorDataset(s_tensor, a_tensor, m_tensor)
+        else:
+            dataset = TensorDataset(s_tensor, a_tensor)
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
+        return loader, diagnostics
 
-    train_loader = _build_loader(train_indices, all_states, all_actions, episode_lengths, shuffle=shuffle)
+    train_loader, train_diagnostics = _build_loader(
+        train_indices,
+        all_states,
+        all_actions,
+        all_segment_bounds,
+        shuffle=shuffle,
+    )
+    _print_chunking_diagnostics("Train", chunking, train_diagnostics)
     val_loader = None
+    val_diagnostics = None
     if val_indices:
-        val_loader = _build_loader(val_indices, all_states, all_actions, episode_lengths, shuffle=False)
+        val_loader, val_diagnostics = _build_loader(
+            val_indices,
+            all_states,
+            all_actions,
+            all_segment_bounds,
+            shuffle=False,
+        )
         print(f"Train/val split: {num_train} train, {num_val} val episodes")
+        _print_chunking_diagnostics("Val", chunking, val_diagnostics)
 
     meta = {
         "conditioning": conditioning,
         "raw_obs_dim": raw_obs_dim,
         "num_phases": NUM_PHASES,
         "num_sticks": num_sticks,
+        "chunking": chunking,
+        "loss_masking": loss_masking,
+        "train_chunking_diagnostics": train_diagnostics,
+        "val_chunking_diagnostics": val_diagnostics,
     }
     return train_loader, val_loader, state_dim, action_dim, obs_norm, action_norm, meta
 
@@ -471,6 +622,9 @@ def main():
     parser.add_argument("--demos-path", default="data/demos.hdf5")
     parser.add_argument("--conditioning", choices=[CONDITIONING_OBS, CONDITIONING_PHASE_ACTIVE],
                         default=CONDITIONING_OBS)
+    parser.add_argument("--phase-boundary-chunks", action="store_true",
+                        help=("Split phase-active demos into constant (phase, active_stick) "
+                              "segments before constructing DPFM action chunks."))
     parser.add_argument("--action-chunk-horizon", type=int, default=None,
                         help="Override action chunk horizon from config")
     parser.add_argument("--execute-steps", type=int, default=None,
@@ -493,7 +647,8 @@ def main():
 
     train(cfg, demos_path=args.demos_path, seed=args.seed, use_wandb=not args.no_wandb,
           checkpoint_dir=args.checkpoint_dir, action_normalizer_type=args.action_normalizer,
-          conditioning=args.conditioning, wandb_run_id=args.wandb_run_id,
+          conditioning=args.conditioning, phase_boundary_chunks=args.phase_boundary_chunks,
+          wandb_run_id=args.wandb_run_id,
           wandb_name=args.wandb_name)
 
 
