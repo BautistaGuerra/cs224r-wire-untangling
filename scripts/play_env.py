@@ -347,6 +347,11 @@ if __name__ == "__main__":
                         help="Override DPFM chunk actions executed before re-planning")
     parser.add_argument("--dpfm-stochastic", action="store_true", default=True,
                         help="Use random Flow Matching initial noise instead of deterministic zero-noise sampling")
+    parser.add_argument("--dpfm-deterministic", dest="dpfm_stochastic", action="store_false",
+                        help="Use zero initial noise for deterministic Flow Matching sampling")
+    parser.add_argument("--dpfm-replan-on-context-change", action="store_true",
+                        help=("For phase-active DPFM, discard cached actions and re-sample "
+                              "when the tracked (phase, active_stick) changes."))
     parser.add_argument("--rrl-checkpoint", type=str, default=None,
                         help="Path to residual RL (TD3) checkpoint (.pt)")
     parser.add_argument("--rrl-config", type=str, default=None,
@@ -423,6 +428,7 @@ if __name__ == "__main__":
             env,
             execute_steps=args.dpfm_execute_steps,
             stochastic=args.dpfm_stochastic,
+            replan_on_context_change=args.dpfm_replan_on_context_change,
         )
         rrl_cfg = None
         if args.rrl_config:
@@ -455,6 +461,7 @@ if __name__ == "__main__":
             env,
             execute_steps=args.dpfm_execute_steps,
             stochastic=args.dpfm_stochastic,
+            replan_on_context_change=args.dpfm_replan_on_context_change,
         )
         run_policy(
             env,
