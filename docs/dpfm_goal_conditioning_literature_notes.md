@@ -12,13 +12,20 @@ Boundary-aware chunks did not close the phase-active DPFM gap.
 
 - Random-order phase-active boundary-aware `h8_e1_i10`: 47-52% success.
 - Random-order phase-active boundary-aware `h4_e1_i10`: 45% success.
+- Random-order phase-active boundary-aware masked `h4_e1_i10`, 300 epochs: 53%
+  success.
+- Random-order phase-active boundary-aware masked `h4_e1_i10`, 1000 epochs: 35%
+  success.
 - Prior random-order phase-active non-boundary `h4_e1_i10`: 54% success.
 - Prior random-order obs-only `h4_e1_i10`: 66% success.
 - Phase-active MLP-BC random-order baseline: about 96% success.
 
 The `h4_e1_i10` boundary-aware checkpoint diagnostics showed about 17% padded
 tail chunks. That is high enough to be suspicious, but probably not high enough
-by itself to explain the full MLP-vs-DPFM gap.
+by itself to explain the full MLP-vs-DPFM gap. The masked-loss results support
+that interpretation: masking recovered to roughly the non-boundary phase-active
+`h4_e1_i10` result at 300 epochs, but did not improve beyond obs-only DPFM and
+degraded with 1000 epochs.
 
 ## Literature Takeaways
 
@@ -225,11 +232,14 @@ for masked runs and keeps default episode chunking at `loss_masking="none"`.
 
 ## Recommendation
 
-1. Implement padded-tail loss masking for boundary-aware chunks.
-2. Train/evaluate masked boundary-aware `h4_e1_i10` and possibly `h8_e1_i10`.
-3. If masking does not produce a large improvement, implement continuous
+1. We will use random-order obs-only DPFM `h4_e1_i10` as the main residual-RL
+   base, since it is the strongest current DPFM behavior-cloning checkpoint at
+   66%.
+2. We will keep masked boundary-aware phase-active `h4_e1_i10` as an ablation
+   for residual RL or final-report discussion, not as the primary base.
+3. If time remains for more BC-side iteration, we will implement continuous
    subgoal conditioning.
-4. Defer per-timestep phase/active context unless we need a report ablation or
-   have time to handle the inference mismatch carefully.
-5. Defer RL fine-tuning until the behavior-cloning conditioning interface is
-   cleaner.
+4. We will defer per-timestep phase/active context unless we need a report
+   ablation or have time to handle the inference mismatch carefully.
+5. We will defer future-context prediction unless the report needs an explicit
+   inference-mismatch ablation.

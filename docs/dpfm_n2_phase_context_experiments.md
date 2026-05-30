@@ -70,11 +70,24 @@ pending.
 | Random order | phase-active | `h4_e1_i10` | 54% | Improvement over `h8_e4`, but still far below MLP. |
 | Random order | obs-only | `h4_e1_i10` | 66% | Essentially matches MLP obs-only random order. |
 | Fixed order | obs-only | `h4_e1_i10` | pending | Training/evaluation in progress. |
+| Random order | phase-active boundary-aware | `h8_e1_i10` | 47% | Split chunks at `(phase, active_stick)` boundaries. |
+| Random order | phase-active boundary-aware + runtime replan | `h8_e1_i10` | 52% | Same checkpoint, discard cached chunks on context change. |
+| Random order | phase-active boundary-aware | `h4_e1_i10` | 45% | Shorter boundary-aware horizon did not help. |
+| Random order | phase-active boundary-aware + padded-tail mask | `h4_e1_i10`, 300 epochs | 53% | Best boundary-aware result, but close to prior non-boundary `h4_e1`. |
+| Random order | phase-active boundary-aware + padded-tail mask | `h4_e1_i10`, 1000 epochs | 35% | Longer training degraded closed-loop performance. |
 
 The key result is that `h4_e1` obs-only random-order DPFM reaches 66%, close to
 the 68% MLP obs-only baseline. This suggests the PR #14 DPFM architecture is
 not fundamentally broken on the randomized N=2 task. The remaining failure is
 specific to how phase-active context is represented for action chunks.
+
+We found that boundary-aware chunking improved over the original random-order
+phase-active `h8_e4_i10` checkpoint at 29%, but it did not close the gap to
+phase-active MLP-BC. The best boundary-aware run was the masked `h4_e1_i10`
+checkpoint at 53%, while the existing non-boundary phase-active `h4_e1_i10`
+result was 54% and obs-only random-order `h4_e1_i10` reached 66%. We will treat
+the boundary-aware phase-conditioning result as useful analysis, not as the
+strongest behavior-cloning baseline for residual RL.
 
 ## Chunk-Boundary Diagnostic
 
@@ -182,6 +195,19 @@ Implementation notes:
   context used to sample that chunk. This is evaluation behavior only and is not
   stored in checkpoints.
 
+For the random-order `h4_e1_i10` boundary-aware checkpoint, we measured:
+
+| Split | Segments | Chunks | Padded-Tail Chunks | Padded-Tail Fraction | Mean Segment Length | Min | Max |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Train | 2529 | 44526 | 7571 | 17.0% | 17.6 | 1 | 34 |
+| Validation | 280 | 4929 | 840 | 17.0% | 17.6 | 8 | 32 |
+
+We used this diagnostic to justify the padded-tail loss mask. Masking removed
+synthetic repeated tail actions from the flow-matching loss, but the 300-epoch
+masked run only reached 53%, and the 1000-epoch masked run dropped to 35%. Our
+interpretation is that padded-tail loss was a real cleanup issue, but it was not
+the dominant cause of the phase-active DPFM gap.
+
 ### 2. Per-Timestep Context Sequence
 
 This is a more principled architecture change. Instead of conditioning the
@@ -230,10 +256,17 @@ be:
 
 ## Current Recommendation
 
-Implement boundary-aware chunks first. It is the lowest-risk test of the main
-hypothesis: phase-active DPFM is underperforming because chunk supervision is
-not phase-consistent. If boundary-aware chunks close a meaningful fraction of
-the gap to phase-active MLP-BC, the final report can present this as an
-important design constraint for combining oracle phase context with diffusion
-or flow-matching action chunks. If not, the next step is per-timestep context
-plus a learned future context predictor.
+We will use the N=2 DPFM implementation as the behavior-cloning base for
+residual RL, with random-order obs-only `h4_e1_i10` as the strongest current
+base checkpoint and masked boundary-aware phase-active `h4_e1_i10` as an
+optional ablation. The obs-only checkpoint is the more pragmatic residual-RL
+starting point because it has the best closed-loop DPFM success so far at 66%.
+
+For the final report, we'll probably present boundary-aware chunks as a
+negative/diagnostic result: they improved over the stale-context `h8_e4`
+phase-active DPFM setting, but did not outperform the simpler non-boundary
+`h4_e1` phase-active checkpoint or the obs-only `h4_e1` baseline. Our working
+explanation is that a single current phase label is not an ideal conditioning
+interface for a sampled future action trajectory. If time remains for BC-side
+iteration, we will try continuous subgoal conditioning, but the immediate
+project priority is residual RL on top of the strongest N=2 DPFM baseline.
