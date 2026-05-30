@@ -359,7 +359,8 @@ def mse_loss(policy, s_batch: torch.Tensor,
 
 
 def flow_matching_loss(policy, s_batch: torch.Tensor,
-                       a_batch: torch.Tensor) -> torch.Tensor:
+                       a_batch: torch.Tensor,
+                       action_mask: torch.Tensor | None = None) -> torch.Tensor:
     """Compute the flow matching loss (MSE on velocity prediction).
 
     The policy (FlowMatchingPolicy) carries its own schedule.
@@ -368,6 +369,8 @@ def flow_matching_loss(policy, s_batch: torch.Tensor,
         policy: FlowMatchingPolicy (model + schedule).
         s_batch: states, shape (B, state_dim).
         a_batch: expert actions, shape (B, action_dim).
+        action_mask: optional mask with same shape as a_batch. Zero entries do
+            not contribute to the MSE.
 
     Returns:
         Scalar MSE loss (mean over batch and action dimensions).
@@ -376,5 +379,14 @@ def flow_matching_loss(policy, s_batch: torch.Tensor,
     t = torch.rand(B, device=a_batch.device)
     a_t, velocity = policy.schedule.interpolate(a_batch, t)
     v_policy = policy(a_t, s_batch, t)
-    fm_loss = torch.mean((v_policy - velocity)**2)
+    squared_error = (v_policy - velocity)**2
+    if action_mask is None:
+        fm_loss = torch.mean(squared_error)
+    else:
+        if action_mask.shape != squared_error.shape:
+            raise ValueError(
+                f"action_mask shape {action_mask.shape} must match loss shape {squared_error.shape}"
+            )
+        action_mask = action_mask.to(dtype=squared_error.dtype)
+        fm_loss = torch.sum(squared_error * action_mask) / torch.clamp(action_mask.sum(), min=1.0)
     return fm_loss

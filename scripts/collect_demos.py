@@ -16,6 +16,9 @@ HDF5 layout:
             phase      (T,)           int8       0..7  (Phase IntEnum)
             active_stick (T,)         int8       active stick index
             is_success (T,)           bool       env._check_success per step
+            attrs:
+                seed        int
+                stick_order int8[]    expert order for this episode
         demo_1/ ...
     attrs:
         num_demos        int    — number of successful episodes
@@ -53,14 +56,18 @@ from wire_untangling.envs import StickReorderEnv
 from wire_untangling.policies import PickPlaceExpertPolicy, build_obs_index_map
 from wire_untangling.policies.pick_place_expert import Phase
 from wire_untangling.utils.seeding import demo_seed, seed_env
+from wire_untangling.utils.stick_order import StickOrderScheduler
 
 
 ORACLE_VERSION_N1 = "1.1-n1-orientation"
 ORACLE_VERSION_N2_SIDE = "1.2-n2-side-goals"
+ORACLE_VERSION_N2_RANDOM_ORDER = "1.3-n2-random-order"
 
 
-def oracle_version_for(env_cfg: dict) -> str:
+def oracle_version_for(env_cfg: dict, expert_cfg: dict | None = None) -> str:
     if env_cfg.get("placement_mode") == "two_stick_side":
+        if (expert_cfg or {}).get("order_mode") == "balanced":
+            return ORACLE_VERSION_N2_RANDOM_ORDER
         return ORACLE_VERSION_N2_SIDE
     return ORACLE_VERSION_N1
 
@@ -122,6 +129,7 @@ def run_episode(
     render: bool = False,
     seed: int | None = None,
     success_hold_steps: int = 5,
+    stick_order=None,
 ):
     """Run one expert rollout. Returns per-step lists and final success.
 
@@ -131,7 +139,8 @@ def run_episode(
     if seed is not None:
         seed_env(gym_env.env, seed)
     obs, _ = gym_env.reset()
-    expert.reset()
+    expert.reset(stick_order=stick_order)
+    episode_order = tuple(expert.stick_order)
 
     ep_obs, ep_actions, ep_rewards, ep_dones = [], [], [], []
     ep_next_obs, ep_phase, ep_active_stick, ep_success = [], [], [], []
@@ -177,6 +186,7 @@ def run_episode(
         "phase": np.array(ep_phase, dtype=np.int8),
         "active_stick": np.array(ep_active_stick, dtype=np.int8),
         "is_success": np.array(ep_success, dtype=bool),
+        "stick_order": np.array(episode_order, dtype=np.int8),
         "final_success": final_success,
         "final_phase": int(expert.phase),
         "final_active_stick": int(expert.active_stick),
@@ -198,23 +208,30 @@ def smoke_test(
     raw_env = make_env(env_cfg, render=False)
     gym_env = GymWrapper(raw_env)
     obs_map = build_obs_index_map(gym_env)
+    order_schedule = StickOrderScheduler(expert_cfg, raw_env.num_sticks)
     expert = PickPlaceExpertPolicy(
         obs_map,
         goal_yaw=env_cfg.get("goal_yaw", 0.0),
-        stick_order=expert_cfg.get("stick_order"),
+        stick_order=order_schedule.order_for(0),
     )
 
     successes = 0
+    successes_by_order: dict[tuple[int, ...], int] = {}
+    attempts_by_order: dict[tuple[int, ...], int] = {}
     failure_phases: dict[int, int] = {}
 
     for i in range(n_rollouts):
         seed = demo_seed(top_seed, i)
-        ep = run_episode(gym_env, expert, seed=seed)
+        stick_order = order_schedule.order_for(i)
+        attempts_by_order[stick_order] = attempts_by_order.get(stick_order, 0) + 1
+        ep = run_episode(gym_env, expert, seed=seed, stick_order=stick_order)
         if ep["final_success"]:
             successes += 1
+            successes_by_order[stick_order] = successes_by_order.get(stick_order, 0) + 1
         else:
             failure_phases[ep["final_phase"]] = failure_phases.get(ep["final_phase"], 0) + 1
         print(f"  rollout {i + 1}/{n_rollouts}: seed={seed} "
+              f"order={StickOrderScheduler.format_order(stick_order)} "
               f"success={ep['final_success']} "
               f"final_active_stick={ep['final_active_stick']} "
               f"final_phase={Phase(ep['final_phase']).name}")
@@ -222,6 +239,15 @@ def smoke_test(
     gym_env.close()
     rate = successes / n_rollouts
     print(f"\nSmoke test: {successes}/{n_rollouts} succeeded ({rate:.1%})")
+    print("Per-order success:")
+    for order in order_schedule.order_choices:
+        order_successes = successes_by_order.get(order, 0)
+        order_attempts = attempts_by_order.get(order, 0)
+        order_rate = order_successes / order_attempts if order_attempts else 0.0
+        print(
+            f"  {StickOrderScheduler.format_order(order)}: "
+            f"{order_successes}/{order_attempts} ({order_rate:.1%})"
+        )
     if failure_phases:
         print("Per-phase failure counts (phase at terminal step):")
         for p, c in sorted(failure_phases.items()):
@@ -252,15 +278,17 @@ def collect(
     raw_env = make_env(env_cfg, render=render)
     gym_env = GymWrapper(raw_env)
     obs_map = build_obs_index_map(gym_env)
+    order_schedule = StickOrderScheduler(expert_cfg, raw_env.num_sticks)
+    order_schedule.require_exact_balance(num_demos)
     expert = PickPlaceExpertPolicy(
         obs_map,
         goal_yaw=env_cfg.get("goal_yaw", 0.0),
-        stick_order=expert_cfg.get("stick_order"),
+        stick_order=order_schedule.order_for(0),
     )
     obs_dim = gym_env.observation_space.shape[0]
 
     cfg_hash = env_config_hash(env_cfg, robosuite.__version__)
-    oracle_version = oracle_version_for(env_cfg)
+    oracle_version = oracle_version_for(env_cfg, expert_cfg)
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
@@ -274,19 +302,24 @@ def collect(
 
     while len(successful_demos) < num_demos and attempts < max_attempts:
         seed = demo_seed(top_seed, attempts)
+        stick_order = order_schedule.order_for(len(successful_demos))
         ep = run_episode(gym_env, expert, render=render, seed=seed,
-                         success_hold_steps=success_hold_steps)
+                         success_hold_steps=success_hold_steps,
+                         stick_order=stick_order)
         attempts += 1
 
         if ep["final_success"]:
             successful_demos.append((seed, ep))
             print(f"  Demo {len(successful_demos)}/{num_demos} collected "
-                  f"(attempt {attempts}, seed={seed}, {len(ep['obs'])} steps)")
+                  f"(attempt {attempts}, seed={seed}, "
+                  f"order={StickOrderScheduler.format_order(stick_order)}, "
+                  f"{len(ep['obs'])} steps)")
         else:
             if save_failures:
                 failed_demos.append((seed, ep))
             print(f"  Attempt {attempts} failed "
-                  f"(seed={seed}, final_active_stick={ep['final_active_stick']}, "
+                  f"(seed={seed}, order={StickOrderScheduler.format_order(stick_order)}, "
+                  f"final_active_stick={ep['final_active_stick']}, "
                   f"final_phase={Phase(ep['final_phase']).name}, "
                   f"{len(ep['obs'])} steps) — skipping")
 
@@ -294,6 +327,12 @@ def collect(
 
     if not successful_demos:
         print("No successful demos collected!")
+        return
+    if len(successful_demos) < num_demos and order_schedule.mode == "balanced":
+        print(
+            f"Only collected {len(successful_demos)}/{num_demos} successful demos; "
+            "not writing an incomplete balanced-order dataset."
+        )
         return
 
     total_samples = sum(d["obs"].shape[0] for _, d in successful_demos)
@@ -305,6 +344,7 @@ def collect(
                         "next_obs", "phase", "active_stick", "is_success"):
                 grp.create_dataset(key, data=demo[key], compression="gzip")
             grp.attrs["seed"] = int(seed)
+            grp.attrs["stick_order"] = np.asarray(demo["stick_order"], dtype=np.int8)
 
         if save_failures and failed_demos:
             failures_grp = f.create_group("failures")
@@ -314,6 +354,7 @@ def collect(
                             "next_obs", "phase", "active_stick", "is_success"):
                     grp.create_dataset(key, data=demo[key], compression="gzip")
                 grp.attrs["seed"] = int(seed)
+                grp.attrs["stick_order"] = np.asarray(demo["stick_order"], dtype=np.int8)
                 grp.attrs["final_phase"] = int(demo["final_phase"])
                 grp.attrs["final_active_stick"] = int(demo["final_active_stick"])
 
@@ -337,6 +378,10 @@ def collect(
     print(f"\nSaved {len(successful_demos)} demos ({total_samples} total transitions) "
           f"to {output_path}")
     print(f"  env_config_hash={cfg_hash}  oracle_version={oracle_version}  top_seed={top_seed}")
+    print("  order_counts:")
+    for order in order_schedule.order_choices:
+        count = sum(tuple(d["stick_order"].tolist()) == order for _, d in successful_demos)
+        print(f"    {StickOrderScheduler.format_order(order)}: {count}")
     if attempts > len(successful_demos):
         print(f"  ({attempts - len(successful_demos)} failed attempts discarded)")
     if save_failures:

@@ -4,10 +4,10 @@ import h5py
 import numpy as np
 import torch
 
-from scripts.train_flow_matching import load_data
-from wire_untangling.utils.normalizer import Normalizer, MinMaxNormalizer
+from scripts.train_flow_matching import CONDITIONING_PHASE_ACTIVE, load_data
+from wire_untangling.utils.normalizer import Normalizer, MinMaxNormalizer, NORM_IDENTITY
 from wire_untangling.policies.policy_inference_wrappers import DPFMModelPolicy
-from wire_untangling.policies.flow_matching_policy import FlowMatchingSchedule
+from wire_untangling.policies.flow_matching_policy import FlowMatchingSchedule, flow_matching_loss
 
 
 def test_dataset_standardization_roundtrip():
@@ -72,7 +72,7 @@ def test_load_data_normalizes_action_chunks(tmp_path):
         grp.create_dataset("obs", data=obs)
         grp.create_dataset("actions", data=actions)
 
-    loader, val_loader, state_dim, action_dim, obs_norm, action_norm = load_data(
+    loader, val_loader, state_dim, action_dim, obs_norm, action_norm, meta = load_data(
         str(path),
         chunk_size=3,
         batch_size=8,
@@ -84,10 +84,121 @@ def test_load_data_normalizes_action_chunks(tmp_path):
     assert action_dim == 2
     assert states.shape[1] == 2
     assert chunks.shape[1] == 6
+    assert meta["conditioning"] == "obs"
+    assert meta["raw_obs_dim"] == 2
+    assert meta["loss_masking"] == "none"
     assert isinstance(obs_norm, Normalizer)
     assert isinstance(action_norm, (Normalizer, MinMaxNormalizer))
     assert abs(float(states.mean())) < 2.0
     assert abs(float(chunks.mean())) < 2.0
+
+
+def test_load_data_phase_active_appends_features(tmp_path):
+    path = tmp_path / "demos.hdf5"
+    obs = np.arange(4 * 3, dtype=np.float32).reshape(4, 3)
+    actions = np.ones((4, 2), dtype=np.float32)
+    phases = np.array([0, 1, 2, 3], dtype=np.int8)
+    active_sticks = np.array([0, 0, 1, 1], dtype=np.int8)
+    with h5py.File(path, "w") as f:
+        f.attrs["env_config"] = '{"num_sticks": 2}'
+        grp = f.create_group("data/demo_0")
+        grp.create_dataset("obs", data=obs)
+        grp.create_dataset("actions", data=actions)
+        grp.create_dataset("phase", data=phases)
+        grp.create_dataset("active_stick", data=active_sticks)
+
+    loader, _, state_dim, action_dim, obs_norm, _, meta = load_data(
+        str(path),
+        chunk_size=2,
+        batch_size=8,
+        shuffle=False,
+        conditioning=CONDITIONING_PHASE_ACTIVE,
+    )
+    states, _ = next(iter(loader))
+
+    assert state_dim == 3 + 8 + 2
+    assert action_dim == 2
+    assert states.shape[1] == state_dim
+    assert obs_norm.normalize_dims == [0, 1, 2]
+    assert meta["conditioning"] == CONDITIONING_PHASE_ACTIVE
+    assert meta["raw_obs_dim"] == 3
+    assert meta["num_sticks"] == 2
+
+
+def test_load_data_phase_boundary_chunks_pad_within_segment(tmp_path):
+    path = tmp_path / "demos.hdf5"
+    obs = np.arange(4 * 2, dtype=np.float32).reshape(4, 2)
+    actions = np.array([[0.0], [1.0], [2.0], [3.0]], dtype=np.float32)
+    phases = np.array([0, 0, 1, 1], dtype=np.int8)
+    active_sticks = np.array([0, 0, 0, 0], dtype=np.int8)
+    with h5py.File(path, "w") as f:
+        f.attrs["env_config"] = '{"num_sticks": 1}'
+        grp = f.create_group("data/demo_0")
+        grp.create_dataset("obs", data=obs)
+        grp.create_dataset("actions", data=actions)
+        grp.create_dataset("phase", data=phases)
+        grp.create_dataset("active_stick", data=active_sticks)
+
+    loader, _, _, action_dim, _, _, meta = load_data(
+        str(path),
+        chunk_size=3,
+        batch_size=8,
+        shuffle=False,
+        conditioning=CONDITIONING_PHASE_ACTIVE,
+        phase_boundary_chunks=True,
+        action_normalizer_type=NORM_IDENTITY,
+    )
+    _, chunks, masks = next(iter(loader))
+    first_chunk = chunks[0].numpy().reshape(3, action_dim)
+    first_mask = masks[0].numpy().reshape(3, action_dim)
+
+    np.testing.assert_allclose(first_chunk[:, 0], [0.0, 1.0, 1.0])
+    np.testing.assert_allclose(first_mask[:, 0], [1.0, 1.0, 0.0])
+    assert meta["chunking"] == "phase_boundary"
+    assert meta["loss_masking"] == "padded_tail"
+    assert meta["train_chunking_diagnostics"]["num_segments"] == 2
+    assert meta["train_chunking_diagnostics"]["num_chunks"] == 4
+
+
+def test_flow_matching_loss_ignores_masked_action_entries():
+    class FakeSchedule:
+        def __init__(self, velocity):
+            self.velocity = velocity
+
+        def interpolate(self, a_batch, timestep):
+            return torch.zeros_like(a_batch), self.velocity.to(a_batch.device)
+
+    class FakePolicy(torch.nn.Module):
+        def __init__(self, velocity):
+            super().__init__()
+            self.schedule = FakeSchedule(velocity)
+
+        def forward(self, noisy_action, state, timestep):
+            return torch.zeros_like(noisy_action)
+
+    velocity = torch.tensor(
+        [
+            [1.0, 2.0, 3.0, 4.0],
+            [5.0, 6.0, 7.0, 8.0],
+        ],
+        dtype=torch.float32,
+    )
+    action_mask = torch.tensor(
+        [
+            [1.0, 0.0, 1.0, 0.0],
+            [0.0, 1.0, 1.0, 0.0],
+        ],
+        dtype=torch.float32,
+    )
+
+    loss = flow_matching_loss(
+        FakePolicy(velocity),
+        torch.zeros(2, 3),
+        torch.zeros_like(velocity),
+        action_mask=action_mask,
+    )
+
+    assert torch.isclose(loss, torch.tensor((1.0 + 9.0 + 36.0 + 49.0) / 4.0))
 
 
 def test_dpfm_policy_executes_chunk_before_requerying():
@@ -124,3 +235,132 @@ def test_dpfm_policy_executes_chunk_before_requerying():
     np.testing.assert_array_equal(a1, np.array([11.0, 11.5], dtype=np.float32))
     np.testing.assert_array_equal(a2, np.array([12.0, 12.5], dtype=np.float32))
     np.testing.assert_array_equal(a3, np.array([20.0, 20.5], dtype=np.float32))
+
+
+def test_dpfm_policy_phase_active_builds_conditioned_state():
+    class Tracker:
+        phase = 3
+        active_stick = 1
+
+        def __init__(self):
+            self.predict_calls = 0
+            self.reset_order = None
+
+        def predict(self, obs):
+            self.predict_calls += 1
+            return np.zeros(7, dtype=np.float32), {}
+
+        def reset(self, stick_order=None):
+            self.reset_order = stick_order
+
+    policy = DPFMModelPolicy.__new__(DPFMModelPolicy)
+    policy.conditioning = CONDITIONING_PHASE_ACTIVE
+    policy.num_phases = 8
+    policy.num_sticks = 2
+    policy._phase_tracker = Tracker()
+    policy._chunk = None
+    policy._nchunk = None
+    policy._chunk_idx = 0
+
+    state = policy._build_state(np.array([0.1, 0.2], dtype=np.float32))
+    policy.reset(stick_order=(1, 0))
+
+    assert state.shape == (12,)
+    np.testing.assert_allclose(state[:2], [0.1, 0.2])
+    assert state[2 + 3] == 1.0
+    assert state[2 + 8 + 1] == 1.0
+    assert policy._phase_tracker.predict_calls == 1
+    assert policy._phase_tracker.reset_order == (1, 0)
+
+
+def test_dpfm_policy_advances_phase_tracker_on_cached_actions():
+    class Tracker:
+        phase = 0
+        active_stick = 0
+
+        def __init__(self):
+            self.predict_calls = 0
+
+        def predict(self, obs):
+            self.predict_calls += 1
+            return np.zeros(7, dtype=np.float32), {}
+
+    policy = DPFMModelPolicy.__new__(DPFMModelPolicy)
+    policy.conditioning = CONDITIONING_PHASE_ACTIVE
+    policy.num_phases = 8
+    policy.num_sticks = 2
+    policy.action_dim = 2
+    policy.pred_horizon = 4
+    policy.execute_steps = 3
+    policy._phase_tracker = Tracker()
+    policy._chunk = None
+    policy._nchunk = None
+    policy._chunk_idx = 0
+
+    def sample_chunk(self, obs):
+        self._build_state(obs)
+        chunk = np.array(
+            [[10 + i, 10 + i + 0.5] for i in range(self.pred_horizon)],
+            dtype=np.float32,
+        )
+        return chunk, chunk
+
+    policy._sample_chunk = types.MethodType(sample_chunk, policy)
+
+    obs = np.zeros(2, dtype=np.float32)
+    policy.predict(obs)
+    policy.predict(obs)
+    policy.predict(obs)
+
+    assert policy._phase_tracker.predict_calls == 3
+
+
+def test_dpfm_policy_replans_cached_actions_on_context_change():
+    class Tracker:
+        phase = 0
+        active_stick = 0
+
+        def __init__(self):
+            self.predict_calls = 0
+
+        def predict(self, obs):
+            self.predict_calls += 1
+            if self.predict_calls == 1:
+                self.phase = 1
+            return np.zeros(7, dtype=np.float32), {}
+
+    policy = DPFMModelPolicy.__new__(DPFMModelPolicy)
+    policy.conditioning = CONDITIONING_PHASE_ACTIVE
+    policy.num_phases = 8
+    policy.num_sticks = 1
+    policy.action_dim = 2
+    policy.pred_horizon = 4
+    policy.execute_steps = 3
+    policy.replan_on_context_change = True
+    policy._phase_tracker = Tracker()
+    policy._chunk = None
+    policy._nchunk = None
+    policy._chunk_idx = 0
+    policy._chunk_context = None
+    policy._last_built_state_context = None
+    calls = {"n": 0}
+
+    def sample_chunk(self, obs):
+        calls["n"] += 1
+        self._build_state(obs)
+        offset = 10 * calls["n"]
+        chunk = np.array(
+            [[offset + i, offset + i + 0.5] for i in range(self.pred_horizon)],
+            dtype=np.float32,
+        )
+        return chunk, chunk
+
+    policy._sample_chunk = types.MethodType(sample_chunk, policy)
+
+    obs = np.zeros(2, dtype=np.float32)
+    a0 = policy.predict(obs)
+    a1 = policy.predict(obs)
+
+    assert calls["n"] == 2
+    np.testing.assert_array_equal(a0, np.array([10.0, 10.5], dtype=np.float32))
+    np.testing.assert_array_equal(a1, np.array([20.0, 20.5], dtype=np.float32))
