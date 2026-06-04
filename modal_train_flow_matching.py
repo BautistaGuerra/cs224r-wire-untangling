@@ -51,7 +51,7 @@ import modal
 import yaml
 
 
-DEFAULT_CONFIG = "configs/stick_reorder_n1.yaml"
+DEFAULT_CONFIG = "configs/stick_reorder.yaml"
 DATA_MOUNT = "/data"
 CHECKPOINT_MOUNT = "/checkpoints"
 

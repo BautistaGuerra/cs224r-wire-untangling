@@ -221,6 +221,15 @@ context model from state or short history.
 See [n2_random_order_results.md](n2_random_order_results.md) for the initial
 random-order BC results and interpretation.
 
+## Paired-Order Multimodal Variant
+
+For the DPFM-vs-MLP multimodality ablation, use
+`configs/stick_reorder_n2_paired_order.yaml`. It reuses the same N=2 side task
+but collects each accepted reset seed twice: once with order `[0, 1]` and once
+with order `[1, 0]`. See
+[n2_multimodal_demo_ablation.md](n2_multimodal_demo_ablation.md) for the
+collection, diagnostic, training, and evaluation commands.
+
 Render a few demos before a large collection:
 
 ```bash
