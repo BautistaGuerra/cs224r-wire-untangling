@@ -20,7 +20,8 @@ the time (see `docs/dpfm_sweep.csv`). RRL exists to push past that ceiling by
 correcting the base policy's mistakes online, while keeping the base behavior as
 a strong, stable prior.
 
-> **Scope:** RRL is currently **single-stick only** (`--num-sticks 1`).
+> **Scope:** The original RRL path was single-stick only. We now support the
+> two-stick random-order setup through the same frozen-DPFM residual interface.
 
 ## Architectural decisions
 
@@ -166,6 +167,84 @@ Useful overrides: `--action-scale`, `--actor-lr`, `--critic-lr`,
 ```bash
 bash sweep_rrl.sh
 ```
+
+### N=2 Random-Order Residual RL
+
+We use the random-order obs-only DPFM `h4_e1_i10` checkpoint as the N=2
+residual-RL base:
+
+```text
+checkpoints/dpfm_pr14_n2_random_obs_zscore_h4_e1_i10/flow_matching_policy.pt
+```
+
+We added `configs/residual_td3_n2_random_order.yaml` so the N=1 TD3 config stays
+unchanged. The N=2 config keeps the same working RLPD-style recipe:
+`offline_fraction=0.5`, dense reward shaping from
+`configs/stick_reorder_n2_random_order.yaml`, and `total_timesteps=1000000`.
+The final selected N=2 run uses `actor.action_scale=0.1`.
+
+Closed-loop evaluation over 100 random-order episodes improved from the DPFM
+obs-only base policy's 60% success to 75% with residual TD3 on top.
+
+For N=2 training, we will launch on Modal:
+
+```bash
+modal run --detach modal_train_residual_rl.py \
+    --env-config configs/stick_reorder_n2_random_order.yaml \
+    --td3-config configs/residual_td3_n2_random_order.yaml \
+    --dpfm-checkpoint checkpoints/dpfm_pr14_n2_random_obs_zscore_h4_e1_i10/flow_matching_policy.pt \
+    --demos-path /data/stick_n2_random_order_demos.hdf5 \
+    --checkpoint-dir checkpoints/rrl_n2_random_obs_h4_e1_i10_as0.1_of0.5_e1m
+```
+
+For a short Modal smoke run, we can override the timestep count:
+
+```bash
+modal run --detach modal_train_residual_rl.py \
+    --env-config configs/stick_reorder_n2_random_order.yaml \
+    --td3-config configs/residual_td3_n2_random_order.yaml \
+    --dpfm-checkpoint checkpoints/dpfm_pr14_n2_random_obs_zscore_h4_e1_i10/flow_matching_policy.pt \
+    --demos-path /data/stick_n2_random_order_demos.hdf5 \
+    --checkpoint-dir checkpoints/rrl_n2_random_obs_h4_e1_i10_smoke \
+    --total-timesteps 1000 \
+    --no-wandb
+```
+
+After training, we will download the checkpoint from the Modal checkpoint
+volume:
+
+```bash
+mkdir -p checkpoints/rrl_n2_random_obs_h4_e1_i10_as0.1_of0.5_e1m
+modal volume get --force cs224r-checkpoints \
+    rrl_n2_random_obs_h4_e1_i10_as0.1_of0.5_e1m/td3_final.pt \
+    checkpoints/rrl_n2_random_obs_h4_e1_i10_as0.1_of0.5_e1m/td3_final.pt
+```
+
+Then we will evaluate against the same N=2 random-order environment:
+
+```bash
+python -m scripts.play_env \
+    --config configs/stick_reorder_n2_random_order.yaml \
+    --rrl-checkpoint checkpoints/rrl_n2_random_obs_h4_e1_i10_as0.1_of0.5_e1m/td3_final.pt \
+    --dpfm_checkpoint checkpoints/dpfm_pr14_n2_random_obs_zscore_h4_e1_i10/flow_matching_policy.pt \
+    --episodes 100
+```
+
+The N=2 implementation keeps the residual actor/critic architecture unchanged,
+but fixes the surrounding training contract:
+
+- We construct the RRL environment from the full env config, including
+  `placement_mode: two_stick_side` and all `side_*` placement ranges.
+- We reset the frozen base policy with the episode order from
+  `StickOrderScheduler`, matching playback.
+- When we populate the offline buffer, we read each demo's stored
+  `stick_order` attribute and reset the base policy with that order.
+- We store replay observations from the base DPFM policy's own normalized state.
+  For obs-only DPFM this is the same raw-observation state as before; for
+  phase-active DPFM it prevents a state-dimension mismatch and keeps the
+  residual input aligned with the base action.
+- We keep stochastic DPFM sampling as the default, matching the existing N=1 RRL
+  behavior. We can pass `--dpfm-deterministic` for later comparisons.
 
 ### Visualize / evaluate
 
