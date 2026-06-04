@@ -233,3 +233,22 @@ Inference:
 Or, from a sweep run:
 
 ```python -m scripts.play_env --config configs/stick_reorder.yaml --rrl-checkpoint checkpoints/sweep_rrl/dpfm_zscore_as0.2_of0.5/td3_final.pt --rrl-config configs/residual_td3.yaml --dpfm_checkpoint checkpoints/sweep_dpfm_2026_05_26/norm_zscore_h8_e4_i20/flow_matching_policy.pt --dpfm-stochastic --num-sticks 1 --episodes 100```
+
+### Train the SAC baseline
+
+This is a standard full-action SAC policy seeded with expert HDF5 transitions.
+It does not use DPFM during training or inference.
+Initial N=1 result: 33% success, showing that full-policy SAC remains much
+harder than learning residual corrections on top of a DPFM BC base.
+
+```python -m scripts.train_sac_baseline --num-sticks 1 --demos-path data/stick_n1_orientation_demos.hdf5 --checkpoint-dir checkpoints/sac_demo_seeded_n1```
+
+Modal:
+
+```modal run --detach modal_train_sac_baseline.py --demos-path /data/stick_n1_orientation_demos.hdf5 --checkpoint-dir checkpoints/sac_demo_seeded_n1```
+
+Override Modal resources with `MODAL_GPU=A100 MODAL_CPU=8 modal run --detach ...`.
+
+Inference:
+
+```python -m scripts.play_env --config configs/stick_reorder.yaml --sac_checkpoint checkpoints/sac_demo_seeded_n1/sac_final.zip --num-sticks 1 --episodes 100```
