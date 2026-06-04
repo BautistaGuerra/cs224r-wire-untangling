@@ -33,6 +33,26 @@ def test_stick_order_scheduler_balanced_alternates_choices():
     ]
 
 
+def test_stick_order_scheduler_paired_balanced_tracks_pair_ids():
+    schedule = StickOrderScheduler(
+        {
+            "order_mode": "paired_balanced",
+            "order_choices": [[0, 1], [1, 0]],
+        },
+        num_sticks=2,
+    )
+
+    assert schedule.uses_paired_seeds
+    assert [schedule.order_for(i) for i in range(4)] == [
+        (0, 1),
+        (1, 0),
+        (0, 1),
+        (1, 0),
+    ]
+    assert [schedule.branch_for(i) for i in range(4)] == [0, 1, 0, 1]
+    assert [schedule.pair_id_for(i) for i in range(4)] == [0, 0, 1, 1]
+
+
 def test_stick_order_scheduler_rejects_invalid_choices():
     with pytest.raises(ValueError, match="permutation"):
         StickOrderScheduler(
@@ -56,3 +76,14 @@ def test_stick_order_scheduler_requires_exact_balance_for_collection():
     schedule.require_exact_balance(4)
     with pytest.raises(ValueError, match="divisible by 2"):
         schedule.require_exact_balance(5)
+
+    paired = StickOrderScheduler(
+        {
+            "order_mode": "paired_balanced",
+            "order_choices": [[0, 1], [1, 0]],
+        },
+        num_sticks=2,
+    )
+    paired.require_exact_balance(4)
+    with pytest.raises(ValueError, match="paired_balanced"):
+        paired.require_exact_balance(5)
