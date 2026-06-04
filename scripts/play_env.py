@@ -26,8 +26,12 @@ Usage:
 """
 
 import argparse
+import csv
+import json
 import os
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 
 import imageio
 import numpy as np
@@ -59,6 +63,23 @@ def _grab_frame(env):
 def load_config(path: str) -> dict:
     with open(path) as f:
         return yaml.safe_load(f)
+
+
+def _collect_stick_metrics(env) -> dict:
+    metrics = {}
+    goal_positions = getattr(env, "_goal_positions", None)
+    for i, body_id in enumerate(getattr(env, "stick_body_ids", [])):
+        pos = env.sim.data.body_xpos[body_id]
+        dist = float(np.linalg.norm(pos - goal_positions[i])) if goal_positions is not None else np.nan
+        yaw_err = float(env._yaw_error(body_id)) if hasattr(env, "_yaw_error") else np.nan
+        placed = bool(
+            dist <= getattr(env, "success_threshold", np.inf)
+            and yaw_err <= getattr(env, "orientation_threshold", np.inf)
+        )
+        metrics[f"stick{i}_dist"] = dist
+        metrics[f"stick{i}_yaw_err"] = yaw_err
+        metrics[f"stick{i}_placed"] = int(placed)
+    return metrics
 
 
 def make_env(
@@ -158,6 +179,8 @@ def run_policy(
     record_path: str = None,
     expert_cfg: dict | None = None,
     results_file: str = None,
+    results_metadata: dict | None = None,
+    step_diagnostics_file: str = None,
 ):
     """Run a trained policy in the environment and report success rate.
     Uses GymWrapper to produce the flat obs vector the policy expects,
@@ -174,6 +197,39 @@ def run_policy(
     successes_by_order: dict[tuple[int, ...], int] = {}
     attempts_by_order: dict[tuple[int, ...], int] = {}
     total_rewards = []
+    episode_records = []
+    step_writer = None
+    step_fh = None
+    if step_diagnostics_file:
+        os.makedirs(os.path.dirname(step_diagnostics_file) or ".", exist_ok=True)
+        step_fh = open(step_diagnostics_file, "w", newline="")
+        step_fields = [
+            "episode",
+            "timestep",
+            "order_str",
+            "reward",
+            "cumulative_reward",
+            "terminated",
+            "truncated",
+            "success",
+            "q_final_mean",
+            "q_final_min",
+            "q_base_mean",
+            "q_base_min",
+            "q_advantage_mean",
+            "q_advantage_min",
+            "residual_l1",
+            "residual_l2",
+            "base_action_l2",
+            "final_action_l2",
+            "phase",
+            "active_stick",
+        ]
+        for i in range(env.num_sticks):
+            step_fields.extend([f"stick{i}_dist", f"stick{i}_yaw_err", f"stick{i}_placed"])
+        step_writer = csv.DictWriter(step_fh, fieldnames=step_fields)
+        step_writer.writeheader()
+
     for ep in range(n_episodes):
         stick_order = order_schedule.order_for(ep)
         attempts_by_order[stick_order] = attempts_by_order.get(stick_order, 0) + 1
@@ -188,11 +244,30 @@ def run_policy(
             print(f"  stick{i} initial pos: {pos}")
 
         while not done:
-            action = policy.predict(obs)
+            diagnostics = {}
+            if step_writer is not None and hasattr(policy, "predict_with_diagnostics"):
+                action, diagnostics = policy.predict_with_diagnostics(obs)
+            else:
+                action = policy.predict(obs)
             obs, reward, terminated, truncated, info = gym_env.step(action)
             done = terminated or truncated
             total_reward += reward
             step += 1
+
+            if step_writer is not None:
+                row = {
+                    "episode": ep + 1,
+                    "timestep": step,
+                    "order_str": StickOrderScheduler.format_order(stick_order),
+                    "reward": float(reward),
+                    "cumulative_reward": float(total_reward),
+                    "terminated": int(terminated),
+                    "truncated": int(truncated),
+                    "success": int(info.get("is_success", False)),
+                }
+                row.update(diagnostics)
+                row.update(_collect_stick_metrics(env))
+                step_writer.writerow(row)
 
             if render:
                 env.render()
@@ -206,25 +281,66 @@ def run_policy(
         if success:
             successes_by_order[stick_order] = successes_by_order.get(stick_order, 0) + 1
         total_rewards.append(total_reward)
+        episode_records.append(
+            {
+                "episode": ep + 1,
+                "order": list(stick_order),
+                "order_str": StickOrderScheduler.format_order(stick_order),
+                "steps": int(step),
+                "total_reward": float(total_reward),
+                "success": bool(success),
+            }
+        )
         print(
             f"Episode {ep + 1}: order={StickOrderScheduler.format_order(stick_order)} "
             f"steps={step}  total_reward={total_reward:.3f}  success={success}"
         )
 
-    mean_reward = np.mean(total_rewards)
-    std_reward = np.std(total_rewards)
-    success_rate = successes / n_episodes
+    mean_reward = float(np.mean(total_rewards))
+    std_reward = float(np.std(total_rewards))
+    success_rate = float(successes / n_episodes)
     print(f"\nSuccess rate: {successes}/{n_episodes} ({success_rate:.0%})")
     print("Per-order success:")
+    per_order_records = []
     for order in order_schedule.order_choices:
         order_successes = successes_by_order.get(order, 0)
         order_attempts = attempts_by_order.get(order, 0)
         order_rate = order_successes / order_attempts if order_attempts else 0.0
+        per_order_records.append(
+            {
+                "order": list(order),
+                "order_str": StickOrderScheduler.format_order(order),
+                "successes": int(order_successes),
+                "attempts": int(order_attempts),
+                "success_rate": float(order_rate),
+            }
+        )
         print(
             f"  {StickOrderScheduler.format_order(order)}: "
             f"{order_successes}/{order_attempts} ({order_rate:.0%})"
         )
     print(f"Reward: {mean_reward:.3f} ± {std_reward:.3f}")
+
+    summary = {
+        "metadata": {
+            "created_at_utc": datetime.now(timezone.utc).isoformat(),
+            **dict(results_metadata or {}),
+        },
+        "aggregate": {
+            "episodes": int(n_episodes),
+            "successes": int(successes),
+            "success_rate": success_rate,
+            "mean_reward": mean_reward,
+            "std_reward": std_reward,
+            "mean_steps": float(np.mean([record["steps"] for record in episode_records])),
+            "std_steps": float(np.std([record["steps"] for record in episode_records])),
+        },
+        "per_order": per_order_records,
+        "episodes": episode_records,
+        "artifacts": {},
+    }
+    if step_diagnostics_file:
+        summary["artifacts"]["step_diagnostics_csv"] = step_diagnostics_file
 
     if results_file:
         os.makedirs(os.path.dirname(results_file) or ".", exist_ok=True)
@@ -234,11 +350,43 @@ def run_policy(
             f.write(f"mean_reward: {mean_reward:.4f}\n")
             f.write(f"std_reward: {std_reward:.4f}\n")
         print(f"Results saved to {results_file}")
+        summary["artifacts"]["text"] = results_file
+
+        results_path = Path(results_file)
+        json_path = results_path.with_suffix(".json")
+        episodes_path = results_path.with_name(f"{results_path.stem}_episodes.csv")
+        summary["artifacts"]["json"] = str(json_path)
+        summary["artifacts"]["episodes_csv"] = str(episodes_path)
+        with open(json_path, "w") as f:
+            json.dump(summary, f, indent=2)
+        with open(episodes_path, "w", newline="") as f:
+            episode_writer = csv.DictWriter(
+                f,
+                fieldnames=["episode", "order_str", "steps", "total_reward", "success"],
+            )
+            episode_writer.writeheader()
+            for record in episode_records:
+                episode_writer.writerow(
+                    {
+                        "episode": record["episode"],
+                        "order_str": record["order_str"],
+                        "steps": record["steps"],
+                        "total_reward": f"{record['total_reward']:.6f}",
+                        "success": int(record["success"]),
+                    }
+                )
+        print(f"Structured results saved to {json_path}")
+        print(f"Episode results saved to {episodes_path}")
+
+    if step_fh is not None:
+        step_fh.close()
+        print(f"Step diagnostics saved to {step_diagnostics_file}")
 
     if writer:
         writer.close()
         print(f"Video saved to {record_path}")
     gym_env.close()
+    return summary
 
 
 def run_expert(
@@ -336,6 +484,8 @@ if __name__ == "__main__":
     parser.add_argument("--episodes", type=int, default=2)
     parser.add_argument("--results-file", type=str, default=None,
                         help="Save success rate and reward stats to a text file")
+    parser.add_argument("--step-diagnostics-file", type=str, default=None,
+                        help="Save per-timestep eval diagnostics to a CSV file")
     parser.add_argument("--config", default=None,
                         help="Optional YAML config for env/expert settings, e.g. configs/stick_reorder_n2.yaml")
     parser.add_argument("--bc_checkpoint", type=str, default=None,
@@ -407,6 +557,7 @@ if __name__ == "__main__":
             record_path=args.record,
             expert_cfg=expert_cfg,
             results_file=args.results_file,
+            step_diagnostics_file=args.step_diagnostics_file,
         )
     elif args.sac_checkpoint:
         policy = SACModelPolicy(args.sac_checkpoint, env)
@@ -419,6 +570,7 @@ if __name__ == "__main__":
             record_path=args.record,
             expert_cfg=expert_cfg,
             results_file=args.results_file,
+            step_diagnostics_file=args.step_diagnostics_file,
         )
     elif args.rrl_checkpoint:
         if not args.dpfm_checkpoint:
@@ -454,6 +606,7 @@ if __name__ == "__main__":
             record_path=args.record,
             expert_cfg=expert_cfg,
             results_file=args.results_file,
+            step_diagnostics_file=args.step_diagnostics_file,
         )
     elif args.dpfm_checkpoint:
         policy = DPFMModelPolicy(
@@ -472,6 +625,7 @@ if __name__ == "__main__":
             record_path=args.record,
             expert_cfg=expert_cfg,
             results_file=args.results_file,
+            step_diagnostics_file=args.step_diagnostics_file,
         )
     else:
         run_random(env, n_episodes=args.episodes, render=args.render, fps=args.fps, record_path=args.record)

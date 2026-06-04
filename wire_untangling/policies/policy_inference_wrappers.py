@@ -200,6 +200,8 @@ class DPFMModelPolicy(ModelPolicy):
         self._chunk_idx = 0
         self._chunk_context = None
         self._last_built_state_context = None
+        self._last_policy_state = None
+        self._last_normalized_policy_state = None
 
     def set_gym_env(self, gym_env, expert_cfg: dict | None = None):
         if self.conditioning != "phase-active":
@@ -224,6 +226,8 @@ class DPFMModelPolicy(ModelPolicy):
         self._chunk_idx = 0
         self._chunk_context = None
         self._last_built_state_context = None
+        self._last_policy_state = None
+        self._last_normalized_policy_state = None
         if self._phase_tracker is not None:
             self._phase_tracker.reset(stick_order=stick_order)
 
@@ -237,7 +241,7 @@ class DPFMModelPolicy(ModelPolicy):
 
     def _build_state(self, obs: np.ndarray) -> np.ndarray:
         obs = np.asarray(obs, dtype=np.float32)
-        if self.conditioning == "obs":
+        if getattr(self, "conditioning", "obs") == "obs":
             self._last_built_state_context = None
             return obs
         if self.conditioning != "phase-active":
@@ -253,6 +257,16 @@ class DPFMModelPolicy(ModelPolicy):
             num_sticks=self.num_sticks,
         )
         return np.concatenate([obs, features], axis=0)
+
+    def _record_policy_state(self, state_np: np.ndarray) -> np.ndarray:
+        self._last_policy_state = np.asarray(state_np, dtype=np.float32)
+        self._last_normalized_policy_state = self.obs_norm.normalize(self._last_policy_state)
+        return self._last_normalized_policy_state
+
+    def get_last_normalized_policy_state(self) -> np.ndarray:
+        if self._last_normalized_policy_state is None:
+            raise RuntimeError("No DPFM policy state has been built yet; call predict_norm first.")
+        return np.asarray(self._last_normalized_policy_state, dtype=np.float32).copy()
 
     def _advance_context_tracker(self, obs: np.ndarray) -> None:
         if getattr(self, "conditioning", "obs") == "phase-active":
@@ -274,7 +288,7 @@ class DPFMModelPolicy(ModelPolicy):
 
     def _sample_chunk(self, obs: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         state_np = self._build_state(obs)
-        obs = self.obs_norm.normalize(state_np)
+        obs = self._record_policy_state(state_np)
         with torch.no_grad():
             state = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
             initial_noise = None
@@ -304,11 +318,19 @@ class DPFMModelPolicy(ModelPolicy):
             self._chunk_idx = 0
             self._chunk_context = getattr(self, "_last_built_state_context", None)
         else:
-            self._advance_context_tracker(obs)
+            if hasattr(self, "obs_norm"):
+                state_np = self._build_state(obs)
+                self._record_policy_state(state_np)
+            else:
+                self._advance_context_tracker(obs)
         action = self._chunk[self._chunk_idx]
         naction = self._nchunk[self._chunk_idx]
         self._chunk_idx += 1
         return action, naction
+
+    def predict_norm_with_state(self, obs: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        action, naction = self.predict_norm(obs)
+        return action, naction, self.get_last_normalized_policy_state()
 
     def predict(self, obs: np.ndarray) -> np.ndarray:
         """Predict unnormalized action value, i.e. in the original policy scope. Used for rollouts."""
@@ -335,15 +357,17 @@ class ResidualRLPolicy(ModelPolicy):
         rl_checkpoint = torch.load(rl_model_path, map_location=self.device, weights_only=True)
         if "rrl_config" in rl_checkpoint:
             from scripts.train_residual_rl import DictConfig
-            saved_raw = rl_checkpoint["rrl_config"]
+            saved_raw = dict(rl_checkpoint["rrl_config"])
             if saved_raw["state_dim"] != self.state_dim:
                 raise ValueError(f"State dimensions for the base policy ({self.state_dim}) do not match state dimensions for the residual policy ({saved_raw['state_dim']})")
             if saved_raw["action_dim"] != self.action_dim:
                 raise ValueError(f"Action dimensions for the base policy ({self.action_dim}) do not match action dimensions for the residual policy ({saved_raw['action_dim']})")
+            saved_raw["device"] = str(self.device)
             rrl_cfg = DictConfig(saved_raw)
         elif rrl_cfg is not None:
             rrl_cfg.state_dim = self.state_dim
             rrl_cfg.action_dim = self.action_dim
+            rrl_cfg.device = str(self.device)
         else:
             raise ValueError(
                 "RRL checkpoint does not contain 'rrl_config' and no rrl_cfg was provided. "
@@ -372,21 +396,65 @@ class ResidualRLPolicy(ModelPolicy):
             base_naction: a base normalized action from the BC policy. we return it so we could store
                 normalized observations in the buffer and pass these to residual RL during the training.
         """
+        final_action, residual_action, base_naction, _ = self._predict_rrl(obs, include_diagnostics=False)
+        return final_action, residual_action, base_naction
+
+    def _predict_rrl(
+        self,
+        obs: np.ndarray,
+        include_diagnostics: bool = False,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
         # Get the base action - unscaled / unnormalized back to the input [-1, 1] space
-        _, base_naction = self.base_policy.predict_norm(obs)
+        _, base_naction, nobs = self.base_policy.predict_norm_with_state(obs)
         with torch.no_grad():
-            # Normalize observations again - now for the residual RL.
-            nobs = self.obs_norm.normalize(obs)
+            nobs_t = torch.tensor(nobs, dtype=torch.float32, device=self.device)
+            base_naction_t = torch.tensor(base_naction, dtype=torch.float32, device=self.device)
             # Sample action from the residual RL policy that is within [-action_scale, action_scale]
             # Note: in the original residual RL we do not apply any scaling here. It will not be sampled from the RRL
             # policy; no noise will be added - just mean value of the predicted action is reported.
             # Final scaling will be applied by the training / evaluation script
-            residual_action = self.rrl_model.act(
-                torch.Tensor(nobs).to(self.device),
-                torch.Tensor(base_naction).to(self.device),
+            residual_action_t = self.rrl_model.act(
+                nobs_t,
+                base_naction_t,
                 # Do not add any noise to the action.
-                eval_mode=True).cpu().numpy()
-        return ResidualRLPolicy.combine_actions(self.action_norm, base_naction, residual_action)
+                eval_mode=True,
+            )
+            residual_action_t = residual_action_t.to(self.device)
+            residual_action = residual_action_t.cpu().numpy()
+
+            diagnostics = {}
+            if include_diagnostics:
+                final_naction_t = TD3Agent.get_combined_action_torch(base_naction_t, residual_action_t)
+                q_final_all = self.rrl_model.critic(nobs_t.unsqueeze(0), final_naction_t.unsqueeze(0)).squeeze(-1)
+                q_base_all = self.rrl_model.critic(nobs_t.unsqueeze(0), base_naction_t.unsqueeze(0)).squeeze(-1)
+                context = getattr(self.base_policy, "_last_built_state_context", None)
+                diagnostics = {
+                    "q_final_mean": float(q_final_all.mean().item()),
+                    "q_final_min": float(q_final_all.min().item()),
+                    "q_base_mean": float(q_base_all.mean().item()),
+                    "q_base_min": float(q_base_all.min().item()),
+                    "q_advantage_mean": float((q_final_all.mean() - q_base_all.mean()).item()),
+                    "q_advantage_min": float((q_final_all.min() - q_base_all.min()).item()),
+                    "residual_l1": float(torch.mean(torch.abs(residual_action_t)).item()),
+                    "residual_l2": float(torch.mean(torch.square(residual_action_t)).item()),
+                    "base_action_l2": float(torch.mean(torch.square(base_naction_t)).item()),
+                    "final_action_l2": float(torch.mean(torch.square(final_naction_t)).item()),
+                }
+                if context is not None:
+                    diagnostics["phase"] = int(context[0])
+                    diagnostics["active_stick"] = int(context[1])
+
+        final_action, residual_action, base_naction = ResidualRLPolicy.combine_actions(
+            self.action_norm,
+            base_naction,
+            residual_action,
+        )
+        return final_action, residual_action, base_naction, diagnostics
+
+    def predict_with_diagnostics(self, obs: np.ndarray) -> Tuple[np.ndarray, dict]:
+        """Predict an action and return RRL critic/residual diagnostics for evaluation."""
+        final_action, _, _, diagnostics = self._predict_rrl(obs, include_diagnostics=True)
+        return final_action, diagnostics
 
     @staticmethod
     def combine_actions(action_norm, base_naction: np.ndarray, residual_action: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:

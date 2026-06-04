@@ -1,0 +1,56 @@
+residual_td3:
+  # Dimensions are inferred from the frozen DPFM checkpoint at runtime.
+  state_dim: null
+  action_dim: null
+
+  device: cuda
+
+  critic_smoothing_stddev_clip: 0.3
+  smoothing_stddev_min: 0.1
+  smoothing_stddev_max: 0.1
+  critic_stddev_decay_steps: 500000
+
+  exploration_stddev_clip: 0.25
+  exploration_stddev_min: 0.05
+  exploration_stddev_max: 0.15
+  exploration_stddev_decay_steps: 300000
+
+  # RLPD-style mixed batches: half online rollout data, half successful demos.
+  offline_fraction: 0.5
+  offline_demos_path: /data/stick_n2_random_order_demos.hdf5
+  offline_max_transitions: null
+
+  total_timesteps: 1000000
+  batch_size: 512
+  replay_buffer_size: 200000
+  learning_starts: 15000
+  gamma: 0.97
+  n_step: 3
+
+  gradient_update_per_env_steps: 1
+  critic_updates_per_gradient_step: 4
+  actor_updates_per_gradient_step: 1
+
+  actor_update_every: 3
+  critic_warmup_steps: 15000
+  num_updates_per_iteration: 1
+
+  actor_grad_clip_norm: 1.0
+  critic_grad_clip_norm: 1.0
+  tau: 0.005
+
+  actor:
+    hidden_dims: [512, 512]
+    p_dropout: 0.0
+    # Final selected N=2 residual setting.
+    action_scale: 0.1
+    lr: 5.0e-6
+
+  critic:
+    hidden_dims: [512, 512]
+    num_critics: 4
+    num_sampled_critics: 2
+    lr: 1.0e-4
+
+td3_train:
+  batch_size: 2048
