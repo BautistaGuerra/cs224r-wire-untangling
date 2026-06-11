@@ -98,14 +98,14 @@ class Normalizer:
             self.loc[~mask] = 0.0
             self.scale[~mask] = 1.0
 
-        # Print out stats
         ndims = len(self.loc)
         normed = len(self.normalize_dims) if self.normalize_dims is not None else ndims
+        np.set_printoptions(precision=4, suppress=True)
         print(
-            f"Normalizer created: dims={ndims}, normalized={normed}, "
-            f"loc=[{self.loc.min():.4f}, {self.loc.max():.4f}], "
-            f"scale=[{self.scale.min():.6f}, {self.scale.max():.4f}]"
-            + (f", clip=[{self.clip_low.min():.2f}, {self.clip_high.max():.2f}]"
+            f"Z-normalizer created: dims={ndims}, normalized={normed}\n"
+            f"  loc:   {self.loc}\n"
+            f"  scale: {self.scale}"
+            + (f"\n  clip_low:  {self.clip_low}\n  clip_high: {self.clip_high}"
                if self.clip_low is not None else "")
         )
 
@@ -248,6 +248,7 @@ class IdentityNormalizer:
     def __init__(self, ndims: int = 0):
         self.ndims = ndims
         self.normalize_dims = None
+        print(f"IdentityNormalizer created: dims={ndims}")
 
     def normalize(self, x: np.ndarray) -> np.ndarray:
         return x
@@ -331,8 +332,10 @@ class MinMaxNormalizer:
 
         normed = int(self._mask.sum())
         print(
-            f"MinMaxNormalizer created: dims={ndims}, normalized={normed}, "
-            f"range=[{self.data_range[self._mask].min():.4f}, {self.data_range[self._mask].max():.4f}]"
+            f"MinMaxNormalizer created. Num. dimensions: {ndims}, dimensions to be normalized: {normed}, "
+            f"data_min: {data_min}"
+            f"data_max: {data_max}"
+            f"range={self.data_range[self._mask]}"
         )
 
     # ── numpy paths ──────────────────────────────────────────────────────
