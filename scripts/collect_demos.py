@@ -227,7 +227,7 @@ def smoke_test(
     expert = PickPlaceExpertPolicy(
         obs_map,
         goal_yaw=env_cfg.get("goal_yaw", 0.0),
-        stick_order=order_schedule.order_for(0),
+        stick_order=expert_cfg.get("stick_order"),
     )
 
     successes = 0
@@ -327,6 +327,8 @@ def collect(
     expert = PickPlaceExpertPolicy(
         obs_map,
         goal_yaw=env_cfg.get("goal_yaw", 0.0),
+        # TODO(alexta): in the main the line was: stick_order=expert_cfg.get("stick_order"),
+        # Check if everything is correct.
         stick_order=order_schedule.order_for(0),
     )
     obs_dim = gym_env.observation_space.shape[0]

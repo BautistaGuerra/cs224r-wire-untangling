@@ -320,6 +320,18 @@ def run_policy(
             f"{order_successes}/{order_attempts} ({order_rate:.0%})"
         )
     print(f"Reward: {mean_reward:.3f} ± {std_reward:.3f}")
+    if hasattr(policy, "context_diagnostics"):
+        diag = policy.context_diagnostics()
+        if int(diag.get("steps", 0)):
+            print(
+                "Learned-vs-oracle context disagreement: "
+                f"phase={diag['phase_disagreements']}/{diag['steps']} "
+                f"({diag['phase_disagreement_rate']:.1%}), "
+                f"active={diag['active_stick_disagreements']}/{diag['steps']} "
+                f"({diag['active_stick_disagreement_rate']:.1%}), "
+                f"joint={diag['joint_disagreements']}/{diag['steps']} "
+                f"({diag['joint_disagreement_rate']:.1%})"
+            )
 
     summary = {
         "metadata": {
@@ -406,6 +418,8 @@ def run_expert(
     expert = PickPlaceExpertPolicy(
         obs_map,
         goal_yaw=getattr(env, "goal_yaw", 0.0),
+        # TODO(alexta): previously, it was stick_order=expert_cfg.get("stick_order"),
+        # In both main and dev branches. Not sure where "stick_order" was coming from.
         stick_order=order_schedule.order_for(0),
     )
     sleep_time = 1.0 / fps if render else 0.0
@@ -490,6 +504,10 @@ if __name__ == "__main__":
                         help="Optional YAML config for env/expert settings, e.g. configs/stick_reorder_n2.yaml")
     parser.add_argument("--bc_checkpoint", type=str, default=None,
                         help="Path to .pt checkpoint for trained MLP-BC policy")
+    parser.add_argument("--context-predictor-checkpoint", type=str, default=None,
+                        help="Optional learned context predictor for phase-active MLP-BC")
+    parser.add_argument("--compare-oracle-context", action="store_true",
+                        help="Track oracle-vs-learned context disagreement while MLP-BC consumes learned context")
     parser.add_argument("--sac_checkpoint", type=str, default=None, help="Path to SB3 .zip checkpoint for trained policy")
     parser.add_argument("--dpfm_checkpoint", type=str, default=None,
                         help="Path to .pth checkpoint for trained DPFM policy")
@@ -515,6 +533,10 @@ if __name__ == "__main__":
     parser.add_argument("--device", type=str, default=None,
                         help="Torch device (e.g. cpu, cuda, cuda:0, cuda:1). Default: auto-detect")
     args = parser.parse_args()
+    if args.context_predictor_checkpoint and not args.bc_checkpoint:
+        parser.error("--context-predictor-checkpoint is valid only with --bc_checkpoint")
+    if args.compare_oracle_context and not args.context_predictor_checkpoint:
+        parser.error("--compare-oracle-context requires --context-predictor-checkpoint")
 
     cfg = load_config(args.config) if args.config else {}
     env_cfg = cfg.get("env", {})
@@ -560,6 +582,8 @@ if __name__ == "__main__":
             expert_cfg=expert_cfg,
             results_file=args.results_file,
             step_diagnostics_file=args.step_diagnostics_file,
+            context_predictor_checkpoint=args.context_predictor_checkpoint,
+            compare_oracle_context=args.compare_oracle_context,
         )
     elif args.sac_checkpoint:
         policy = SACModelPolicy(args.sac_checkpoint, env)
