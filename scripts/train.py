@@ -37,6 +37,7 @@ from stable_baselines3.common.monitor import Monitor
 from wandb.integration.sb3 import WandbCallback
 
 from wire_untangling.envs import StickReorderEnv
+from wire_untangling.utils.seeding import resolve_seed
 
 
 def load_config(path: str) -> dict:
@@ -71,6 +72,7 @@ def train(
     seed: int = 42,
     use_wandb: bool = True,
     checkpoint_dir: str = "checkpoints",
+    device: str | None = None,
 ):
     # Seed everything for reproducibility
     random.seed(seed)
@@ -130,6 +132,7 @@ def train(
         batch_size=train_cfg.get("batch_size", 256),
         buffer_size=train_cfg.get("buffer_size", 1_000_000),
         tensorboard_log=tensorboard_log,
+        device=device or "auto",
         verbose=1,
     )
 
@@ -154,6 +157,8 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--checkpoint-dir", default="checkpoints")
     parser.add_argument("--no-wandb", action="store_true")
+    parser.add_argument("--device", type=str, default=None,
+                        help="Torch device (e.g. cpu, cuda, cuda:0, cuda:1). Default: auto-detect")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -161,7 +166,7 @@ if __name__ == "__main__":
 
     # CLI args override config values when provided
     total_timesteps = args.timesteps or train_cfg.get("total_timesteps", 1_000_000)
-    seed = args.seed if args.seed is not None else train_cfg.get("seed", 42)
+    seed = resolve_seed(args.seed)
 
     train(
         config,
@@ -169,4 +174,5 @@ if __name__ == "__main__":
         seed=seed,
         use_wandb=not args.no_wandb,
         checkpoint_dir=args.checkpoint_dir,
+        device=args.device,
     )

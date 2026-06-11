@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.join(_REPO_ROOT, "scripts"))
 # scripts/collect_demos.py lives under sys.path after the insert above; this
 # import must therefore happen *after* the sys.path manipulation.
 from collect_demos import env_config_hash, make_env  # noqa: E402
+from analyze_multimodal_demos import load_pair_summaries, summarize_pairs  # noqa: E402
 
 
 def test_env_config_hash_deterministic():
@@ -97,3 +98,35 @@ def test_hdf5_roundtrip_with_phase_and_success(tmp_path):
         phases = f["data/demo_0/phase"][:]
         assert phases.dtype == np.int8
         assert phases.min() >= 0 and phases.max() <= 7
+
+
+def test_paired_multimodal_demo_analysis(tmp_path):
+    out = tmp_path / "paired.hdf5"
+    obs = np.zeros((4, 8), dtype=np.float32)
+    actions_a = np.zeros((4, 7), dtype=np.float32)
+    actions_b = np.zeros((4, 7), dtype=np.float32)
+    actions_a[:, 1] = 1.0
+    actions_b[:, 1] = -1.0
+
+    with h5py.File(out, "w") as f:
+        f.attrs["multimodal_collection"] = "paired_order"
+        data = f.create_group("data")
+        for i, (order, actions) in enumerate(
+            [([0, 1], actions_a), ([1, 0], actions_b)]
+        ):
+            grp = data.create_group(f"demo_{i}")
+            grp.create_dataset("obs", data=obs)
+            grp.create_dataset("actions", data=actions)
+            grp.attrs["stick_order"] = np.asarray(order, dtype=np.int8)
+            grp.attrs["multimodal_pair_id"] = 0
+            grp.attrs["multimodal_branch"] = i
+
+    summaries = load_pair_summaries(str(out), prefix_horizon=4)
+    summary = summarize_pairs(summaries, action_diff_threshold=0.25)
+
+    assert summary["num_pairs"] == 1
+    assert summary["identical_initial_obs_pairs"] == 1
+    assert summary["action_multimodal_pairs"] == 1
+    assert summary["max_initial_obs_diff"] == 0.0
+    assert summary["mean_y_cancellation_ratio"] == 0.0
+    assert summary["order_counts"] == {(0, 1): 1, (1, 0): 1}

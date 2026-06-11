@@ -94,8 +94,11 @@ class ConditionalResidualBlock1D(nn.Module):
 
 class ConditionalUnet1D(nn.Module):
     def __init__(self, input_dim, global_cond_dim,
-                 diffusion_step_embed_dim=32,
-                 down_dims=(32, 64), kernel_size=5, n_groups=8):
+                 # diffusion_step_embed_dim=32,
+                 # down_dims=(32, 64),
+                 diffusion_step_embed_dim=256,
+                 down_dims=(256, 512, 1024),
+                 kernel_size=5, n_groups=8):
         super().__init__()
         all_dims = [input_dim] + list(down_dims)
         start_dim = down_dims[0]
@@ -328,6 +331,11 @@ class FlowMatchingPolicy(nn.Module):
             num_integration_steps=num_integration_steps,
         )
 
+    @staticmethod
+    def default_execute_steps(pred_horizon: int) -> int:
+        """Default number of chunk actions to execute before re-planning."""
+        return max(1, pred_horizon // 2)
+
     def forward(self, noisy_action, state, timestep):
         return self.model(noisy_action, state, timestep)
 
@@ -351,7 +359,8 @@ def mse_loss(policy, s_batch: torch.Tensor,
 
 
 def flow_matching_loss(policy, s_batch: torch.Tensor,
-                       a_batch: torch.Tensor) -> torch.Tensor:
+                       a_batch: torch.Tensor,
+                       action_mask: torch.Tensor | None = None) -> torch.Tensor:
     """Compute the flow matching loss (MSE on velocity prediction).
 
     The policy (FlowMatchingPolicy) carries its own schedule.
@@ -360,6 +369,8 @@ def flow_matching_loss(policy, s_batch: torch.Tensor,
         policy: FlowMatchingPolicy (model + schedule).
         s_batch: states, shape (B, state_dim).
         a_batch: expert actions, shape (B, action_dim).
+        action_mask: optional mask with same shape as a_batch. Zero entries do
+            not contribute to the MSE.
 
     Returns:
         Scalar MSE loss (mean over batch and action dimensions).
@@ -368,5 +379,14 @@ def flow_matching_loss(policy, s_batch: torch.Tensor,
     t = torch.rand(B, device=a_batch.device)
     a_t, velocity = policy.schedule.interpolate(a_batch, t)
     v_policy = policy(a_t, s_batch, t)
-    fm_loss = torch.mean((v_policy - velocity)**2)
+    squared_error = (v_policy - velocity)**2
+    if action_mask is None:
+        fm_loss = torch.mean(squared_error)
+    else:
+        if action_mask.shape != squared_error.shape:
+            raise ValueError(
+                f"action_mask shape {action_mask.shape} must match loss shape {squared_error.shape}"
+            )
+        action_mask = action_mask.to(dtype=squared_error.dtype)
+        fm_loss = torch.sum(squared_error * action_mask) / torch.clamp(action_mask.sum(), min=1.0)
     return fm_loss

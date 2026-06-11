@@ -1,0 +1,34 @@
+sac_baseline:
+  # Standard full-action SAC baseline. The actor outputs the whole robosuite
+  # action directly; DPFM is not used during training or inference.
+  total_timesteps: 500000
+  seed: 42
+  device: auto
+
+  # Stable-Baselines3 SAC hyperparameters.
+  learning_rate: 3.0e-4
+  batch_size: 256
+  buffer_size: 1000000
+  gamma: 0.99
+  tau: 0.005
+  train_freq: 1
+  gradient_steps: 1
+  ent_coef: auto
+  policy_hidden_dims: [256, 256]
+
+  # Demo-seeded runs can learn immediately from the preloaded replay buffer.
+  # Pure online SAC should collect some random experience first.
+  learning_starts: 0
+  no_demo_seed_learning_starts: 10000
+
+  eval_freq: 10000
+  n_eval_episodes: 10
+  checkpoint_freq: 50000
+  log_interval: 10
+
+  demo_seed:
+    enabled: true
+    demos_path: data/stick_n1_orientation_demos.hdf5
+    max_transitions: null
+    warn_on_config_mismatch: true
+

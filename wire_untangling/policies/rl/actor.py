@@ -23,20 +23,29 @@ class RRLActor(nn.Module):
     def __init__(self,  state_dim, action_dim, cfg):
         super(RRLActor, self).__init__()
         self.cfg = cfg
-
-        self.policy = nn.Sequential(
-            nn.Linear(state_dim[0] + action_dim[0], cfg.actor.hidden_dim),
-            nn.LayerNorm(cfg.actor.hidden_dim),
-            nn.Dropout(cfg.actor.p_dropout),
-            nn.ReLU(inplace=True),
-            nn.Linear(cfg.actor.hidden_dim, cfg.actor.hidden_dim),
-            nn.LayerNorm(cfg.actor.hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(cfg.actor.hidden_dim, action_dim[0]),
-            nn.Tanh()
-        )
-
+        layers = self._produce_actor_trunk(state_dim, action_dim, cfg)
+        self.policy = nn.Sequential(*layers)
         self.apply(init_actor_weights)
+        # Init final layer with near-zero weights so the residual starts near zero
+        # and the base policy runs unperturbed initially.
+        final_linear = self.policy[-2]  # last Linear, before Tanh
+        nn.init.uniform_(final_linear.weight, -1e-3, 1e-3)
+        nn.init.zeros_(final_linear.bias)
+
+    def _produce_actor_trunk(self, state_dim, action_dim, cfg):
+        """Create a network for the actor."""
+        layers = []
+        prev_layer_dim = state_dim + action_dim
+        for i, layer_dim in enumerate(cfg.actor.hidden_dims):
+            layers.append(nn.Linear(prev_layer_dim, layer_dim))
+            layers.append(nn.LayerNorm(layer_dim))
+            if i == 0:
+                layers.append(nn.Dropout(cfg.actor.p_dropout))
+            layers.append(nn.ReLU(inplace=True))
+            prev_layer_dim = layer_dim
+        layers.append(nn.Linear(prev_layer_dim, action_dim))
+        layers.append(nn.Tanh())
+        return layers
 
 
     def forward(self, obs, base_action, std):

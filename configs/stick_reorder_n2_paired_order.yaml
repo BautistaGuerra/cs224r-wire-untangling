@@ -1,0 +1,45 @@
+env:
+  robot: Panda
+  num_sticks: 2
+  stick_length: 0.20
+  stick_radius: 0.0075
+  success_threshold: 0.03
+  orientation_threshold: 0.1745
+  lambda_rot: 0.1
+  goal_yaw: 0.0
+  placement_mode: two_stick_side
+  side_init_x_range: [-0.11, 0.11]
+  side_init_y_ranges:
+    - [-0.24, -0.12]
+    - [0.12, 0.24]
+  side_init_yaw_range: [-0.523599, 0.523599]  # +/- 30 degrees
+  side_goal_x: 0.0
+  side_goal_y_ranges:
+    - [-0.08, -0.02]
+    - [0.02, 0.08]
+  stick_color_indices: [1, 0]  # stick0 blue on negative Y, stick1 red on positive Y
+  reward_shaping: true
+  horizon: 1000
+
+expert:
+  # Multimodal obs-only ablation: each accepted pair reuses the same reset
+  # seed for both orders, so demo_2k and demo_2k+1 start from the same
+  # physical scene but move to different sticks first.
+  order_mode: paired_balanced
+  order_choices:
+    - [0, 1]
+    - [1, 0]
+
+training:
+  algorithm: SAC
+  total_timesteps: 1_000_000
+  learning_rate: 3.0e-4
+  batch_size: 256
+  buffer_size: 1_000_000
+  seed: 42
+  eval_freq: 10000
+  n_eval_episodes: 10
+
+modal:
+  gpu: "A10G"
+  timeout: 10800

@@ -9,25 +9,51 @@ residual_td3:
   # ── Exploration noise schedule ──────────────────────────────────────
   # Noise std linearly decays from stddev_max → stddev_min over stddev_decay_steps.
   # stddev_clip truncates sampled noise to [-clip, clip] in TruncatedNormal.
-  stddev_clip: 0.3
-  stddev_max: 0.15
-  stddev_min: 0.05
-  stddev_decay_steps: 200000
+
+  # Q-learning critic smoothing noise and schedule. In the original ResFiT algorithm it does not change
+  # and is same during the training process
+  critic_smoothing_stddev_clip: 0.3
+  smoothing_stddev_min: 0.1
+  smoothing_stddev_max: 0.1
+  critic_stddev_decay_steps: 500000
+
+  # This is an exploration noise
+  exploration_stddev_clip: 0.25
+  exploration_stddev_min: 0.05
+  exploration_stddev_max: 0.15
+  exploration_stddev_decay_steps: 300000
+
+  # ── Offline data (RLPD-style mixed training) ────────────────────────
+  # Fraction of each batch sampled from the offline buffer (0.0 = online-only)
+  offline_fraction: 0.5
+  # Path to HDF5 demos for offline buffer (null = skip offline buffer)
+  offline_demos_path: data/demos.hdf5
+  # Max transitions to load into the offline buffer (null = load all demos)
+  offline_max_transitions: null
 
   # ── Training loop ──────────────────────────────────────────────────
   total_timesteps: 500000
-  batch_size: 256
+  batch_size: 512
   replay_buffer_size: 200000
   # Number of random-action steps before learning begins (fills replay buffer)
-  learning_starts: 10000
-  # Discount factor for Bellman target: y = r + gamma * (1 - done) * Q_target
+  # Note: must be > n_step
+  learning_starts: 15000
+  # Discount factor for Bellman target: y = r + gamma^n * nonterminal * Q(s_{t+n})
   gamma: 0.97
+  # N-step returns horizon. n_step=1 is standard TD(0). n_step=3 is default from RLPD.
+  n_step: 3
+
   # How many env steps between each gradient update
-  update_every_n_steps: 1
+  gradient_update_per_env_steps: 1
+  critic_updates_per_gradient_step: 4
+  actor_updates_per_gradient_step: 1
+
   # Actor is updated once every this many critic updates (TD3 delayed policy update)
   actor_update_every: 3
   # Train critic only (no actor updates) for this many initial steps
-  critic_warmup_steps: 8000
+  critic_warmup_steps: 15000
+  # The number of updates per iteration (UTD)
+  num_updates_per_iteration: 1
 
   # ── Gradient clipping ──────────────────────────────────────────────
   # Max gradient L2 norm per optimizer step
@@ -39,29 +65,26 @@ residual_td3:
 
   # ── Actor (residual policy) ────────────────────────────────────────
   actor:
-    hidden_dim: 128
+    # Sequence of hidden layer widths, one Linear per entry.
+    hidden_dims: [512, 512]
     # Dropout disabled: noise during actor loss gradient harms learning
     p_dropout: 0.0
     # Tanh output is multiplied by action_scale; keeps initial residuals small
-    # relative to the base BC action. Reduced from 0.3 to avoid Tanh saturation.
-    action_scale: 0.15
+    # relative to the base BC action.
+    action_scale: 0.2
     # Actor LR lower than critic to avoid chasing an unstable critic
-    lr: 1.0e-5
+    lr: 5.0e-6
 
   # ── Critic (Q-function ensemble) ───────────────────────────────────
   critic:
-    hidden_dim: 128
+    # Sequence of hidden layer widths, one Linear per entry.
+    hidden_dims: [512, 512]
     # Reduced from 10 to 2: large ensembles overfit on simple state-based tasks
-    num_critics: 3
+    num_critics: 4
     # How many heads to sample for clipped double-Q target (min over subset)
     num_sampled_critics: 2
-    lr: 3.0e-4
+    lr: 1.0e-4
 
 td3_train:
   # Size of the training batch
   batch_size: 2048
-  # Training epochs
-  epochs: 200
-  # Learning rate
-  lr: 1e-4
-  device: gpu

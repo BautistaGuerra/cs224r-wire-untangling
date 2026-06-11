@@ -1,10 +1,13 @@
-""" Environment creation fr flow matching and residual RL (environment must be strictly same). """
-from wire_untangling.envs import StickReorderEnv
+"""Environment creation for flow matching and residual RL."""
+
 import numpy as np
 
-def make_rrl_gym_env_1stick(env_cfg: dict):
-    """Create a gym environment for a single stick"""
-    env = StickReorderEnv(
+from wire_untangling.envs import StickReorderEnv
+
+
+def make_rrl_gym_env(env_cfg: dict):
+    """Create the residual-RL environment from the same config surface as playback."""
+    kwargs = dict(
         robots=env_cfg.get("robot", "Panda"),
         num_sticks=env_cfg.get("num_sticks", 1),
         stick_length=env_cfg.get("stick_length", 0.20),
@@ -15,6 +18,7 @@ def make_rrl_gym_env_1stick(env_cfg: dict):
         lambda_rot=env_cfg.get("lambda_rot", 0.1),
         goal_yaw=env_cfg.get("goal_yaw", 0.0),
         reward_shaping=env_cfg.get("reward_shaping", True),
+        success_bonus=env_cfg.get("success_bonus", 1.0),
         terminate_on_success=env_cfg.get("terminate_on_success", True),
         has_renderer=False,
         has_offscreen_renderer=False,
@@ -22,4 +26,24 @@ def make_rrl_gym_env_1stick(env_cfg: dict):
         control_freq=20,
         horizon=env_cfg.get("horizon", 500),
     )
-    return env
+    optional_env_keys = (
+        "placement_mode",
+        "init_x_range",
+        "init_y_range",
+        "side_init_x_range",
+        "side_init_y_ranges",
+        "side_init_yaw_range",
+        "side_goal_x",
+        "side_goal_y_ranges",
+        "stick_color_indices",
+    )
+    for key in optional_env_keys:
+        if key in env_cfg:
+            kwargs[key] = env_cfg[key]
+
+    return StickReorderEnv(**kwargs)
+
+
+def make_rrl_gym_env_1stick(env_cfg: dict):
+    """Backward-compatible alias for the original single-stick factory name."""
+    return make_rrl_gym_env(env_cfg)

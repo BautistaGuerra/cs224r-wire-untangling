@@ -110,12 +110,16 @@ class StickReorderEnv(ManipulationEnv):
         side_goal_y_ranges=((-0.08, -0.02), (0.02, 0.08)),
         stick_color_indices=None,
         reward_shaping: bool = True,
+        success_bonus: float = 1.0,
         terminate_on_success: bool = True,
         table_full_size=(0.8, 0.8, 0.05),
         table_friction=(1.0, 0.005, 0.0001),
         **kwargs,
     ):
         self.num_sticks = num_sticks
+        # Per-stick one-shot success bonus flag.
+        # Ensures each stick's success_bonus fires at most once per episode.
+        self._stick_success_rewarded = [False] * num_sticks
         self.stick_length = stick_length
         self.stick_radius = stick_radius
         self.goal_spacing = goal_spacing
@@ -132,6 +136,7 @@ class StickReorderEnv(ManipulationEnv):
         self.side_goal_x = float(side_goal_x)
         self.side_goal_y_ranges = tuple(tuple(r) for r in side_goal_y_ranges)
         self.reward_shaping = reward_shaping
+        self.success_bonus = success_bonus
         self.terminate_on_success = terminate_on_success
         self.reward_scale = 1.0   # required by GymWrapper
         self.use_object_obs = True  # always include stick positions in obs
@@ -324,6 +329,7 @@ class StickReorderEnv(ManipulationEnv):
         """Randomize stick positions on the table at the start of each episode.
         Writes 7D joint state (xyz + quaternion) directly into MuJoCo sim."""
         super()._reset_internal()
+        self._stick_success_rewarded = [False] * self.num_sticks
         if not self.deterministic_reset:
             if self.placement_mode == "two_stick_side":
                 self._goal_positions = self._compute_side_goal_positions(sample=True)
@@ -369,19 +375,23 @@ class StickReorderEnv(ManipulationEnv):
     def reward(self, action=None) -> float:
         """Compute reward for current state.
         Dense: -sum_i (dist_i + lambda_rot * yaw_err_i).
-        Sparse: +1.0 bonus when all sticks are within success_threshold of goals
+        Sparse: +success_bonus per stick that is within success_threshold of its goal
         AND yaw_err <= orientation_threshold."""
         reward = 0.0
 
-        if self.reward_shaping:
-            for i, body_id in enumerate(self.stick_body_ids):
+        for i, body_id in enumerate(self.stick_body_ids):
+            if self.reward_shaping:
                 pos = self.sim.data.body_xpos[body_id]
                 dist = np.linalg.norm(pos - self._goal_positions[i])
                 yaw_err = self._yaw_error(body_id)
                 reward -= dist + self.lambda_rot * yaw_err
 
-        if self._check_success():
-            reward += 1.0
+            # One-shot per-stick bonus: reward the agent once when a stick
+            # first reaches its goal, rather than every timestep it stays there.
+            # This gives a clear learning signal for N>1 without inflating returns.
+            if self._check_success(i) and not self._stick_success_rewarded[i]:
+                reward += self.success_bonus
+                self._stick_success_rewarded[i] = True
 
         return reward
 
@@ -394,13 +404,27 @@ class StickReorderEnv(ManipulationEnv):
             done = True
         return reward, done, info
 
-    def _check_success(self) -> bool:
-        """All sticks must be within success_threshold of their goal positions
-        AND within orientation_threshold of goal_yaw (mod π)."""
-        for i, body_id in enumerate(self.stick_body_ids):
+    def _is_gripper_open(self, threshold: float = 0.02) -> bool:
+        """Check if the gripper fingers are open (not grasping)."""
+        idx = self.robots[0]._ref_gripper_joint_pos_indexes["right"]
+        qpos = self.sim.data.qpos[idx[0]]
+        return qpos > threshold
+
+    def _check_success(self, k: int | None = None) -> bool:
+        """Check success for stick k, or all sticks if k is None.
+
+        A stick is successful when it is within success_threshold of its goal
+        AND within orientation_threshold of goal_yaw (mod pi)."""
+        if k is not None:
+            body_id = self.stick_body_ids[k]
             pos = self.sim.data.body_xpos[body_id]
-            if np.linalg.norm(pos - self._goal_positions[i]) > self.success_threshold:
+            if np.linalg.norm(pos - self._goal_positions[k]) > self.success_threshold:
                 return False
             if self._yaw_error(body_id) > self.orientation_threshold:
+                return False
+            return True
+
+        for i in range(len(self.stick_body_ids)):
+            if not self._check_success(i):
                 return False
         return True

@@ -17,9 +17,33 @@ so seeds are stable across re-runs and don't collide with neighbouring runs.
 from __future__ import annotations
 
 import numpy as np
+import torch
 
 
 PRIME_OFFSET = 1_000_003
+
+
+def resolve_seed(seed: int | None) -> int:
+    """Return *seed* if given, otherwise a fresh random seed. Prints when random."""
+    if seed is not None:
+        return int(seed)
+    chosen = int(np.random.default_rng().integers(0, 2**31))
+    print(f"No seed specified; using random seed={chosen}")
+    return chosen
+
+
+def resolve_device(device: str | None) -> torch.device:
+    """Return a torch.device from a CLI string like 'cuda', 'cuda:1', 'cpu'.
+
+    If None or 'auto', auto-detect: CUDA -> MPS -> CPU.
+    """
+    if device is None or device == "auto":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        elif torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+    return torch.device(device)
 
 
 def seed_env(raw_env, seed: int) -> None:
