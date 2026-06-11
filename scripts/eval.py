@@ -7,6 +7,9 @@ and prints aggregate metrics (success rate, reward, episode length).
 Usage:
     python scripts/eval.py --checkpoint checkpoints/best/best_model.zip
     python scripts/eval.py --checkpoint checkpoints/best/best_model.zip --episodes 100 --seed 0
+
+TODO(alexta): this script, to the best of my knowledge, does not really used in the codebase and is deprecated.
+Consider removing it.
 """
 
 import argparse
@@ -18,6 +21,7 @@ from stable_baselines3.common.monitor import Monitor
 
 from scripts.train import make_gym_env
 from wire_untangling.utils.eval import evaluate
+from wire_untangling.utils.seeding import resolve_seed
 
 
 def main():
@@ -25,7 +29,9 @@ def main():
     parser.add_argument("--checkpoint", required=True, help="Path to .zip checkpoint")
     parser.add_argument("--config", default="configs/stick_reorder.yaml")
     parser.add_argument("--episodes", type=int, default=50)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--device", type=str, default=None,
+                        help="Torch device (e.g. cpu, cuda, cuda:0, cuda:1). Default: auto-detect")
     args = parser.parse_args()
 
     with open(args.config) as f:
@@ -34,10 +40,10 @@ def main():
     # Load model; pass env so SB3 can reconstruct observation/action spaces
     # TODO: The SAC algorithm is only a baseline, we will replace it with our custom one
     env = Monitor(make_gym_env(config["env"]))
-    model = SAC.load(args.checkpoint, env=env)
+    model = SAC.load(args.checkpoint, env=env, device=args.device or "auto")
     env.close()
 
-    results = evaluate(model, config["env"], n_episodes=args.episodes, seed=args.seed)
+    results = evaluate(model, config["env"], n_episodes=args.episodes, seed=resolve_seed(args.seed))
 
     print(f"\nCheckpoint : {args.checkpoint}")
     print(f"Episodes   : {results['n_episodes']}")

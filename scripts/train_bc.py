@@ -27,6 +27,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from wire_untangling.utils.normalizer import Normalizer, DEFAULT_SCALE_OBSERVATIONS, DEFAULT_SCALE_ACTIONS
 
 from wire_untangling.policies.mlp_bc import MLPBCPolicy, mse_loss
+from wire_untangling.utils.seeding import resolve_seed, resolve_device
 
 
 CONDITIONING_OBS = "obs"
@@ -207,17 +208,13 @@ def train(
     use_wandb: bool,
     checkpoint_dir: str,
     conditioning: str = CONDITIONING_OBS,
+    device: str | None = None,
 ):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-    elif torch.backends.mps.is_available():
-        device = torch.device("mps")
-    else:
-        device = torch.device("cpu")
+    device = resolve_device(device)
     print(f"Training device: {device}")
 
     loader, state_dim, action_dim, obs_norm, conditioning_meta = load_data(
@@ -310,8 +307,10 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--hidden-dims", type=int, nargs="+", default=[256, 256, 256])
     parser.add_argument("--dropout", type=float, default=0.0)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--no-wandb", action="store_true")
+    parser.add_argument("--device", type=str, default=None,
+                        help="Torch device (e.g. cpu, cuda, cuda:0, cuda:1). Default: auto-detect")
     parser.add_argument("--conditioning", choices=[CONDITIONING_OBS, CONDITIONING_PHASE_ACTIVE],
                         default=CONDITIONING_OBS,
                         help="Input features for BC. 'obs' uses only env observations; "
@@ -334,10 +333,11 @@ def main():
         lr=args.lr,
         hidden_dims=tuple(args.hidden_dims),
         dropout=args.dropout,
-        seed=args.seed,
+        seed=resolve_seed(args.seed),
         use_wandb=not args.no_wandb,
         checkpoint_dir=args.checkpoint_dir,
         conditioning=args.conditioning,
+        device=args.device,
     )
 
 

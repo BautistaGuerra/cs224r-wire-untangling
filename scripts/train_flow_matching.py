@@ -13,6 +13,7 @@ from wire_untangling.utils.normalizer import (
     action_normalize_dims,
     create_normalizer_from_data, NORM_ZSCORE, NORM_MINMAX, NORM_IDENTITY,
 )
+from wire_untangling.utils.seeding import resolve_seed, resolve_device
 
 
 CONDITIONING_OBS = "obs"
@@ -90,6 +91,7 @@ def train(
     phase_boundary_chunks: bool = False,
     wandb_run_id: str | None = None,
     wandb_name: str | None = None,
+    device: str | None = None,
 ):
     dpfm_cfg = config.get("dpfm", {})
     train_cfg = config.get("dpfm_train", {})
@@ -101,7 +103,7 @@ def train(
         np.random.seed(seed)
         torch.manual_seed(seed)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = resolve_device(device)
     batch_size = int(train_cfg.get("batch_size", 2048))
     epochs = int(train_cfg.get("epochs", 20))
     lr = float(train_cfg.get("lr", 1e-4))
@@ -633,6 +635,8 @@ def main():
                         help="Override number of flow matching integration steps from config")
     parser.add_argument("--wandb-run-id", default=None)
     parser.add_argument("--wandb-name", default=None)
+    parser.add_argument("--device", type=str, default=None,
+                        help="Torch device (e.g. cpu, cuda, cuda:0, cuda:1). Default: auto-detect")
     args = parser.parse_args()
 
     cfg = load_config(args.env_config, args.dpfm_config)
@@ -645,11 +649,12 @@ def main():
     if args.integration_steps is not None:
         cfg.setdefault("dpfm", {})["integration_steps"] = args.integration_steps
 
-    train(cfg, demos_path=args.demos_path, seed=args.seed, use_wandb=not args.no_wandb,
+    train(cfg, demos_path=args.demos_path, seed=resolve_seed(args.seed), use_wandb=not args.no_wandb,
           checkpoint_dir=args.checkpoint_dir, action_normalizer_type=args.action_normalizer,
           conditioning=args.conditioning, phase_boundary_chunks=args.phase_boundary_chunks,
           wandb_run_id=args.wandb_run_id,
-          wandb_name=args.wandb_name)
+          wandb_name=args.wandb_name,
+          device=args.device)
 
 
 if __name__ == "__main__":

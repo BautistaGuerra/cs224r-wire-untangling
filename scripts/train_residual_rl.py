@@ -25,6 +25,7 @@ from wire_untangling.envs import StickReorderEnv
 from wire_untangling.policies.rl.agent import TD3Agent
 from wire_untangling.policies.policy_inference_wrappers import DPFMModelPolicy, ResidualRLPolicy
 from wire_untangling.utils.normalizer import Normalizer, DEFAULT_SCALE_OBSERVATIONS, DEFAULT_SCALE_ACTIONS
+from wire_untangling.utils.seeding import resolve_seed, resolve_device
 from wire_untangling.utils.stick_order import StickOrderScheduler
 import scripts.rrl_env_creation as rrl_env
 
@@ -372,6 +373,7 @@ def train(
     resume_checkpoint: str | None = None,
     auto_resume: bool = False,
     checkpoint_callback: Callable[[str, int], None] | None = None,
+    device: str | None = None,
 ):
     td3_raw = config.get("residual_td3", {})
     env_cfg = config.get("env", {})
@@ -382,7 +384,7 @@ def train(
         np.random.seed(seed)
         torch.manual_seed(seed)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = resolve_device(device)
 
     # Create environment
     gym_env = make_gym_env(env_cfg)
@@ -396,6 +398,7 @@ def train(
         execute_steps=dpfm_execute_steps,
         stochastic=dpfm_stochastic,
         replan_on_context_change=dpfm_replan_on_context_change,
+        device=str(device),
     )
     base_policy.set_gym_env(gym_env, expert_cfg=expert_cfg)
     obs_norm = base_policy.obs_norm
@@ -413,6 +416,7 @@ def train(
         td3_raw["action_dim"] = action_dim
     else:
         assert td3_raw["action_dim"] == action_dim
+    td3_raw["device"] = str(device)
     td3_cfg = DictConfig(td3_raw)
     agent = TD3Agent(td3_cfg)
 
@@ -534,8 +538,11 @@ def train(
     print(f"  state_dim={state_dim}, action_dim={action_dim}")
     print(f"  num_sticks={env_num_sticks}, order_mode={order_schedule.mode}")
     print(f"  dpfm_stochastic={dpfm_stochastic}, dpfm_execute_steps={base_policy.execute_steps}")
-    print(f"  learning_starts={td3_cfg.learning_starts}, batch_size={td3_cfg.batch_size}")
-    print(f"  critic_warmup={td3_cfg.critic_warmup_steps}, actor_update_every={td3_cfg.actor_update_every}")
+    print(f"  batch_size={td3_cfg.batch_size}")
+    print(f"  critic_warmup={td3_cfg.critic_warmup_steps}, learning_starts={td3_cfg.learning_starts}")
+    print(f"  gradient_update_per_env_steps={td3_cfg.gradient_update_per_env_steps}")
+    print(f"  critic_updates_per_gradient_step={td3_cfg.critic_updates_per_gradient_step}")
+    print(f"  actor_updates_per_gradient_step={td3_cfg.actor_updates_per_gradient_step}")
     if resume_path:
         print("  online replay buffer is rebuilt after resume; updates wait until it has a batch.")
 
@@ -558,6 +565,7 @@ def train(
         residual_naction = None
         # Action selection: random during warmup, policy + noise after
         if global_step < td3_cfg.learning_starts:
+            # Learning hasn't started yet; sample residual actions randomly for an initial state exploration.
             # Uniform random residual bounded by action_scale for initial exploration
             residual_naction = np.random.uniform(
                 -td3_cfg.actor.action_scale, td3_cfg.actor.action_scale, size=action_dim
@@ -653,6 +661,8 @@ def train(
                 agent.eval()
                 critic_updates += 1
             if critic_updates >= td3_cfg.critic_warmup_steps:
+                # Initially for a given number of steps we train only a critic.
+                # Here these steps are complete, and we are training actor as well.
                 for _ in range(td3_cfg.actor_updates_per_gradient_step):
                     # Note: unlike ResFiT we sample a different batch for training the actor
                     batch = sample_buffers(offline_buffer, replay_buffer, offline_fraction, device)
@@ -787,6 +797,8 @@ def main():
                         help="Override num_sticks from env config")
     parser.add_argument("--reward-shaping", action=argparse.BooleanOptionalAction, default=None,
                         help="Override reward_shaping from env config (--reward-shaping / --no-reward-shaping)")
+    parser.add_argument("--success-bonus", type=float, default=None,
+                        help="Override success_bonus from env config")
     parser.add_argument("--demos-path", type=str, default=None,
                         help="Override offline_demos_path from config")
     parser.add_argument("--seed", type=int, default=None)
@@ -815,6 +827,8 @@ def main():
     parser.add_argument("--dpfm-replan-on-context-change", action="store_true",
                         help=("For phase-active DPFM, discard cached actions and re-sample "
                               "when tracked (phase, active_stick) changes."))
+    parser.add_argument("--device", type=str, default=None,
+                        help="Torch device (e.g. cpu, cuda, cuda:0, cuda:1). Default: auto-detect")
     args = parser.parse_args()
 
     cfg = load_config(args.env_config, args.td3_config)
@@ -824,6 +838,8 @@ def main():
         cfg["env"]["num_sticks"] = args.num_sticks
     if args.reward_shaping is not None:
         cfg["env"]["reward_shaping"] = args.reward_shaping
+    if args.success_bonus is not None:
+        cfg["env"]["success_bonus"] = args.success_bonus
     td3 = cfg.setdefault("residual_td3", {})
     if args.action_scale is not None:
         td3.setdefault("actor", {})["action_scale"] = args.action_scale
@@ -839,7 +855,7 @@ def main():
         td3["offline_fraction"] = args.offline_fraction
     if args.total_timesteps is not None:
         td3["total_timesteps"] = args.total_timesteps
-    seed = args.seed if args.seed is not None else 42
+    seed = resolve_seed(args.seed)
 
     train(
         cfg,
@@ -852,6 +868,7 @@ def main():
         dpfm_replan_on_context_change=args.dpfm_replan_on_context_change,
         resume_checkpoint=args.resume_checkpoint,
         auto_resume=args.auto_resume,
+        device=args.device,
     )
 
 

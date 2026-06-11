@@ -55,7 +55,7 @@ from robosuite.wrappers import GymWrapper
 from wire_untangling.envs import StickReorderEnv
 from wire_untangling.policies import PickPlaceExpertPolicy, build_obs_index_map
 from wire_untangling.policies.pick_place_expert import Phase
-from wire_untangling.utils.seeding import demo_seed, seed_env
+from wire_untangling.utils.seeding import demo_seed, resolve_seed, seed_env
 from wire_untangling.utils.stick_order import StickOrderScheduler
 
 
@@ -505,8 +505,9 @@ if __name__ == "__main__":
                         help="Run N headless rollouts, report success rate, no save.")
     parser.add_argument("--smoke-n", type=int, default=50)
     parser.add_argument("--smoke-threshold", type=float, default=0.95)
-    parser.add_argument("--seed", type=int, default=42,
-                        help="Top-level seed. Attempt i uses seed * 1_000_003 + i.")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Top-level seed. Attempt i uses seed * 1_000_003 + i. "
+                             "Random if not specified.")
     parser.add_argument("--num-sticks", type=int, default=None,
                         help="Override env.num_sticks from config.")
     parser.add_argument("--save-failures", action="store_true",
@@ -538,6 +539,8 @@ if __name__ == "__main__":
         # gripper-opening segment plus a few tail steps without entering the
         # state-independent RETREAT idle (which dilutes per-phase statistics).
         success_hold_steps = 15 if args.no_terminate_on_success else 5
+
+    args.seed = resolve_seed(args.seed)
 
     if args.smoke:
         env_cfg = dict(config.get("env", {}))

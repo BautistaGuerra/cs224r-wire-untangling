@@ -512,6 +512,8 @@ if __name__ == "__main__":
     parser.add_argument("--num-sticks", type=int, default=None, help="Override number of sticks")
     parser.add_argument("--reward-shaping", action=argparse.BooleanOptionalAction, default=None,
                         help="Override reward_shaping from env config (--reward-shaping / --no-reward-shaping)")
+    parser.add_argument("--device", type=str, default=None,
+                        help="Torch device (e.g. cpu, cuda, cuda:0, cuda:1). Default: auto-detect")
     args = parser.parse_args()
 
     cfg = load_config(args.config) if args.config else {}
@@ -547,7 +549,7 @@ if __name__ == "__main__":
             expert_cfg=expert_cfg,
         )
     elif args.bc_checkpoint:
-        policy = MLPBCModelPolicy(args.bc_checkpoint, env)
+        policy = MLPBCModelPolicy(args.bc_checkpoint, env, device=args.device)
         run_policy(
             env,
             policy,
@@ -581,6 +583,7 @@ if __name__ == "__main__":
             execute_steps=args.dpfm_execute_steps,
             stochastic=args.dpfm_stochastic,
             replan_on_context_change=args.dpfm_replan_on_context_change,
+            device=args.device,
         )
         rrl_cfg = None
         if args.rrl_config:
@@ -596,6 +599,7 @@ if __name__ == "__main__":
             base_policy=base_policy,
             gym_env=env,
             rrl_cfg=rrl_cfg,
+            device=args.device,
         )
         run_policy(
             env,
@@ -615,6 +619,7 @@ if __name__ == "__main__":
             execute_steps=args.dpfm_execute_steps,
             stochastic=args.dpfm_stochastic,
             replan_on_context_change=args.dpfm_replan_on_context_change,
+            device=args.device,
         )
         run_policy(
             env,

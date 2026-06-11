@@ -25,6 +25,7 @@ import torch
 import yaml
 from robosuite.wrappers import GymWrapper
 
+from wire_untangling.utils.seeding import resolve_seed
 from wire_untangling.policies.policy_inference_wrappers import (
     DPFMModelPolicy,
     MLPBCModelPolicy,
@@ -126,11 +127,13 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--num-demos", type=int, default=200)
     parser.add_argument("--eval-episodes", type=int, default=50)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--skip-collect", action="store_true", default=True,
                         help="Skip demo collection (reuse existing data/demos.hdf5)")
     parser.add_argument("--demos-path", default="data/demos.hdf5")
     parser.add_argument("--env-config", default="configs/stick_reorder.yaml")
+    parser.add_argument("--device", type=str, default=None,
+                        help="Torch device (e.g. cpu, cuda, cuda:0, cuda:1). Default: auto-detect")
     args = parser.parse_args()
 
     # Checkpoint paths for both policies — training scripts write here,
@@ -141,6 +144,7 @@ def main():
     fm_ckpt = os.path.join(fm_ckpt_dir, "flow_matching_policy.pt")
 
     # Load environment config and force single-stick mode for this pipeline
+    args.seed = resolve_seed(args.seed)
     env_cfg = load_env_config(args.env_config)
     env_cfg["num_sticks"] = 1
 
@@ -161,31 +165,37 @@ def main():
     # Trains a 3-layer MLP (256-256-256, ReLU, tanh output) with MSE loss
     # on single (state, action) pairs. Observations are z-score normalized.
     # Defaults: 500 epochs, lr=1e-3, batch_size=256.
-    run_step("Train MLP-BC policy", [
+    bc_cmd = [
         sys.executable, "-m", "scripts.train_bc",
         "--demos-path", args.demos_path,
         "--checkpoint-dir", bc_ckpt_dir,
         "--no-wandb",
         "--seed", str(args.seed),
-    ])
+    ]
+    if args.device:
+        bc_cmd += ["--device", args.device]
+    run_step("Train MLP-BC policy", bc_cmd)
 
     # ── 3. Train DPFM ────────────────────────────────────────────────
     # Trains a flow matching policy with a temporal 1D U-Net that predicts
     # action chunks (horizon=10). Uses conditional OT interpolation and
     # MSE on velocity targets. Defaults: 200 epochs, lr=1e-4, batch_size=2048.
-    run_step("Train Flow Matching (DPFM) policy", [
+    fm_cmd = [
         sys.executable, "-m", "scripts.train_flow_matching",
         "--demos-path", args.demos_path,
         "--checkpoint-dir", fm_ckpt_dir,
         "--no-wandb",
         "--seed", str(args.seed),
-    ])
+    ]
+    if args.device:
+        fm_cmd += ["--device", args.device]
+    run_step("Train Flow Matching (DPFM) policy", fm_cmd)
 
     # ── 4. Evaluate MLP-BC ───────────────────────────────────────────
     # Load the trained MLP-BC checkpoint. MLPBCModelPolicy handles
     # observation normalization internally using saved corpus statistics.
     print("\nLoading MLP-BC checkpoint for evaluation...")
-    bc_policy = MLPBCModelPolicy(bc_ckpt)
+    bc_policy = MLPBCModelPolicy(bc_ckpt, device=args.device)
     bc_results = evaluate(bc_policy, env_cfg, args.eval_episodes, "MLP-BC")
 
     # ── 5. Evaluate DPFM ─────────────────────────────────────────────
@@ -195,7 +205,7 @@ def main():
     # Needs a gym_env reference for action space bounds.
     print("Loading DPFM checkpoint for evaluation...")
     fm_env = make_eval_env(env_cfg)
-    fm_policy = DPFMModelPolicy(fm_ckpt, fm_env)
+    fm_policy = DPFMModelPolicy(fm_ckpt, fm_env, device=args.device)
     fm_env.close()
     fm_results = evaluate(fm_policy, env_cfg, args.eval_episodes, "DPFM (Flow Matching)")
 

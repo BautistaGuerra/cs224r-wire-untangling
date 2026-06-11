@@ -4,6 +4,9 @@ This trains a standard full-action Stable-Baselines3 SAC policy. It does not
 call DPFM during training or inference. When demo seeding is enabled, expert
 HDF5 transitions are inserted into the SAC replay buffer before online learning
 starts.
+
+TODO(alexta): this is a very simplistic baseline SAC method that does not really used and is
+only for establishing a baselione. Consider removing in the future versions.
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
 from stable_baselines3.common.monitor import Monitor
 
 from wire_untangling.envs import StickReorderEnv
+from wire_untangling.utils.seeding import resolve_seed, resolve_device
 
 
 def load_config(
@@ -216,11 +220,14 @@ def train(
     seed: int | None = None,
     use_wandb: bool = True,
     checkpoint_dir: str = "checkpoints/sac_demo_seeded_n1",
+    device: str | None = None,
 ) -> None:
     env_cfg = dict(config.get("env", {}))
     sac_cfg = dict(config.get("sac_baseline", {}))
     demo_cfg = dict(sac_cfg.get("demo_seed", {}))
-    seed = int(seed if seed is not None else sac_cfg.get("seed", 42))
+    if device is not None:
+        sac_cfg["device"] = device
+    seed = resolve_seed(seed)
 
     random.seed(seed)
     np.random.seed(seed)
@@ -369,6 +376,8 @@ def main() -> None:
     parser.add_argument("--num-sticks", type=int, default=1)
     parser.add_argument("--reward-shaping", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--no-wandb", action="store_true")
+    parser.add_argument("--device", type=str, default=None,
+                        help="Torch device (e.g. cpu, cuda, cuda:0, cuda:1). Default: auto-detect")
     args = parser.parse_args()
 
     cfg = load_config(args.env_config, args.sac_config)
@@ -397,6 +406,7 @@ def main() -> None:
         seed=args.seed,
         use_wandb=not args.no_wandb,
         checkpoint_dir=args.checkpoint_dir,
+        device=args.device,
     )
 
 

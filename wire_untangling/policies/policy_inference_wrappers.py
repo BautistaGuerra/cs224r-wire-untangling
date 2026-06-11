@@ -8,6 +8,7 @@ from wire_untangling.policies.mlp_bc import MLPBCPolicy
 from wire_untangling.policies.flow_matching_policy import FlowMatchingPolicy
 from wire_untangling.policies.rl.agent import TD3Agent
 from wire_untangling.utils.normalizer import Normalizer, MinMaxNormalizer, IdentityNormalizer, load_normalizer
+from wire_untangling.utils.seeding import resolve_device
 from wire_untangling.utils.stick_order import StickOrderScheduler
 from wire_untangling.policies import PickPlaceExpertPolicy, build_obs_index_map
 
@@ -52,14 +53,9 @@ class SACModelPolicy(ModelPolicy):
 
 
 class MLPBCModelPolicy(ModelPolicy):
-    def __init__(self, model_path: str, gym_env=None):
+    def __init__(self, model_path: str, gym_env=None, device: str | None = None):
         super().__init__(model_path, gym_env)
-        if torch.cuda.is_available():
-            self.device = torch.device("cuda")
-        elif torch.backends.mps.is_available():
-            self.device = torch.device("mps")
-        else:
-            self.device = torch.device("cpu")
+        self.device = resolve_device(device)
 
         ckpt = torch.load(model_path, map_location=self.device, weights_only=True)
         self.action_dim = int(ckpt["action_dim"])
@@ -146,10 +142,11 @@ class DPFMModelPolicy(ModelPolicy):
         execute_steps: int | None = None,
         stochastic: bool = True,
         replan_on_context_change: bool = False,
+        device: str | None = None,
     ):
         super().__init__(model_path, gym_env)
         self.gym_env = gym_env
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = resolve_device(device)
 
         checkpoint = torch.load(model_path, map_location=self.device, weights_only=True)
         self.action_dim = int(checkpoint["action_dim"])
@@ -180,8 +177,10 @@ class DPFMModelPolicy(ModelPolicy):
         print(f'Replan on context change: {self.replan_on_context_change}')
 
         assert "obs_norm" in checkpoint
+        print('Creating an observation normalizer')
         self.obs_norm = Normalizer.from_state_dict(checkpoint["obs_norm"])
         assert "action_norm" in checkpoint
+        print('Creating an action normalizer')
         self.action_norm = load_normalizer(checkpoint["action_norm"])
 
         self.model = FlowMatchingPolicy(
@@ -341,13 +340,13 @@ class DPFMModelPolicy(ModelPolicy):
 class ResidualRLPolicy(ModelPolicy):
     """A residual RL policy. Incorporates the base behavior cloning policy."""
 
-    def __init__(self, rl_model_path: str, base_model_path: str, base_policy: ModelPolicy, gym_env, rrl_cfg=None):
+    def __init__(self, rl_model_path: str, base_model_path: str, base_policy: ModelPolicy, gym_env, rrl_cfg=None, device: str | None = None):
         super().__init__(rl_model_path, gym_env)
         print('')
         print('Initializing the ResidualRL policy')
         print('')
         self.gym_env = gym_env
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = resolve_device(device)
         self.base_policy = base_policy
 
         base_checkpoint = torch.load(base_model_path, map_location=self.device, weights_only=True)
